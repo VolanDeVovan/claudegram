@@ -205,6 +205,12 @@ async function main() {
 		sessions: sessionManager,
 	};
 
+	const coreCommandDescriptions: Record<string, string> = {
+		start: "Show bot info and available commands",
+		new: "Start a new conversation",
+		clear: "Clear current session",
+	};
+
 	async function reloadPlugins(): Promise<{
 		loaded: string[];
 		errors: string[];
@@ -229,6 +235,7 @@ async function main() {
 				newLoaded.commands.set(name, {
 					plugin: "core",
 					handler,
+					description: coreCommandDescriptions[name],
 				});
 			}
 		}
@@ -238,6 +245,19 @@ async function main() {
 		// Build and swap middleware
 		const composer = buildMiddleware(loadedPlugins);
 		currentMiddleware = composer.middleware();
+
+		// Sync command list with Telegram for autocomplete
+		const botCommands: Array<{ command: string; description: string }> = [
+			{ command: "cancel", description: "Cancel current operation" },
+			{ command: "ping", description: "Check bot status" },
+		];
+		for (const [name, { description }] of loadedPlugins.commands) {
+			botCommands.push({
+				command: name,
+				description: description ?? `/${name}`,
+			});
+		}
+		await bot.api.setMyCommands(botCommands);
 
 		const loadedNames = loadedPlugins.plugins.map((p) => p.name);
 		const errorMsgs = loadedPlugins.errors.map((e) => `${e.path}: ${e.error}`);
