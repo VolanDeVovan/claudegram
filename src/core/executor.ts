@@ -292,12 +292,7 @@ export class Executor {
 			sdkOptions.resume = sessionId;
 		}
 
-		// Build prompt with images
-		let prompt = opts.message;
-		if (opts.images && opts.images.length > 0) {
-			// Images are passed as base64 data URIs in the prompt for now
-			prompt = opts.message;
-		}
+		const prompt = opts.message;
 
 		log.info(
 			"Query started for project {project}, model {model}, session {session}",

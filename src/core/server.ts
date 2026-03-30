@@ -94,17 +94,35 @@ async function main() {
 		await next();
 	});
 
-	// 3. Inject pluginContext into every context
+	// 3. Log all commands (uses Telegram bot_command entities)
+	bot.use(async (ctx, next) => {
+		const entities =
+			ctx.message?.entities ?? ctx.channelPost?.entities ?? [];
+		const text =
+			ctx.message?.text ?? ctx.channelPost?.text ?? "";
+		for (const e of entities) {
+			if (e.type === "bot_command") {
+				const command = text.slice(e.offset, e.offset + e.length);
+				log.info("Command {command} from user {userId}", {
+					command,
+					userId: String(ctx.from?.id),
+				});
+			}
+		}
+		await next();
+	});
+
+	// 4. Inject pluginContext into every context
 	let currentPluginCtx: PluginContext;
 	bot.use(async (ctx, next) => {
 		ctx.pluginContext = currentPluginCtx;
 		await next();
 	});
 
-	// 4. /cancel and /ping — bypass queue
+	// 5. /cancel and /ping — bypass queue
 	registerCoreCommands(bot, sessionManager, config, () => loadedPlugins);
 
-	// 5. Owner auth
+	// 6. Owner auth
 	bot.use(async (ctx, next) => {
 		const userId = String(ctx.from?.id);
 		if (!userId) return;
@@ -135,7 +153,7 @@ async function main() {
 		log.info("Message from user {userId} denied", { userId });
 	});
 
-	// 6. Sequentialize per user+project
+	// 7. Sequentialize per user+project
 	bot.use(
 		sequentialize((ctx) => {
 			const userId = String(ctx.from?.id ?? "unknown");
@@ -144,7 +162,7 @@ async function main() {
 		}),
 	);
 
-	// 7. Swappable plugin middleware
+	// 8. Swappable plugin middleware
 	let currentMiddleware: MiddlewareFn<BotContext> = (_ctx, next) => next();
 	bot.use((ctx, next) => currentMiddleware(ctx, next));
 

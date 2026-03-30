@@ -50,14 +50,16 @@ export class SessionManager implements SessionAPI {
 		if (!session) throw new Error(`Session ${sessionId} not found`);
 
 		// Deactivate current active session for this user+project
-		this.db.exec(
-			`UPDATE sessions SET is_active = 0 WHERE user_id = '${session.user_id}' AND project_name = '${session.project_name}' AND is_active = 1`,
-		);
+		this.db
+			.query(
+				"UPDATE sessions SET is_active = 0 WHERE user_id = ? AND project_name = ? AND is_active = 1",
+			)
+			.run(session.user_id, session.project_name);
 
 		// Activate target
-		this.db.exec(
-			`UPDATE sessions SET is_active = 1, last_used = '${new Date().toISOString()}' WHERE id = '${sessionId}'`,
-		);
+		this.db
+			.query("UPDATE sessions SET is_active = 1, last_used = ? WHERE id = ?")
+			.run(new Date().toISOString(), sessionId);
 
 		log.info("Session {id} activated for user {user} project {project}", {
 			id: sessionId,
@@ -94,15 +96,19 @@ export class SessionManager implements SessionAPI {
 	}
 
 	deactivateSession(sessionId: string): void {
-		this.db.exec(`UPDATE sessions SET is_active = 0 WHERE id = '${sessionId}'`);
+		this.db
+			.query("UPDATE sessions SET is_active = 0 WHERE id = ?")
+			.run(sessionId);
 	}
 
 	createSession(sessionId: string, userId: string, projectName: string): void {
 		const now = new Date().toISOString();
 		// Deactivate any existing active session
-		this.db.exec(
-			`UPDATE sessions SET is_active = 0 WHERE user_id = '${userId}' AND project_name = '${projectName}' AND is_active = 1`,
-		);
+		this.db
+			.query(
+				"UPDATE sessions SET is_active = 0 WHERE user_id = ? AND project_name = ? AND is_active = 1",
+			)
+			.run(userId, projectName);
 		this.db
 			.query(
 				"INSERT INTO sessions (id, user_id, project_name, created_at, last_used, turns, cost_usd, is_active) VALUES (?, ?, ?, ?, ?, 0, 0, 1)",
@@ -116,15 +122,19 @@ export class SessionManager implements SessionAPI {
 	}
 
 	updateSession(sessionId: string, turns: number, costUsd: number): void {
-		this.db.exec(
-			`UPDATE sessions SET last_used = '${new Date().toISOString()}', turns = ${turns}, cost_usd = ${costUsd} WHERE id = '${sessionId}'`,
-		);
+		this.db
+			.query(
+				"UPDATE sessions SET last_used = ?, turns = ?, cost_usd = ? WHERE id = ?",
+			)
+			.run(new Date().toISOString(), turns, costUsd, sessionId);
 	}
 
 	clearSession(userId: string, projectName: string): void {
-		this.db.exec(
-			`UPDATE sessions SET is_active = 0 WHERE user_id = '${userId}' AND project_name = '${projectName}' AND is_active = 1`,
-		);
+		this.db
+			.query(
+				"UPDATE sessions SET is_active = 0 WHERE user_id = ? AND project_name = ? AND is_active = 1",
+			)
+			.run(userId, projectName);
 		log.info("Session cleared for user {user} project {project}", {
 			user: userId,
 			project: projectName,
@@ -143,10 +153,11 @@ export class SessionManager implements SessionAPI {
 	}
 
 	setActiveProject(userId: string, project: string): void {
-		this.db.exec(
-			`INSERT INTO user_state (user_id, active_project) VALUES ('${userId}', '${project}')
-			 ON CONFLICT(user_id) DO UPDATE SET active_project = '${project}'`,
-		);
+		this.db
+			.query(
+				"INSERT INTO user_state (user_id, active_project) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET active_project = ?",
+			)
+			.run(userId, project, project);
 	}
 
 	// ── Concurrency ──

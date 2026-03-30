@@ -43,7 +43,6 @@ export interface QueryOpts {
 	message: string;
 	userId: string;
 	project: string;
-	images?: Array<{ mediaType: string; data: string }>;
 	signal?: AbortSignal;
 }
 
