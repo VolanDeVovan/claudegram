@@ -20,6 +20,3 @@ Bun runtime, grammy (Telegram), @anthropic-ai/claude-agent-sdk, bun:sqlite, LogT
 - `bun run src/core/server.ts` — start bot
 - `bunx biome check --write .` — lint + format fix
 
-## Environment Variables
-
-- `ANTHROPIC_API_KEY` — required

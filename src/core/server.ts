@@ -96,10 +96,8 @@ async function main() {
 
 	// 3. Log all commands (uses Telegram bot_command entities)
 	bot.use(async (ctx, next) => {
-		const entities =
-			ctx.message?.entities ?? ctx.channelPost?.entities ?? [];
-		const text =
-			ctx.message?.text ?? ctx.channelPost?.text ?? "";
+		const entities = ctx.message?.entities ?? ctx.channelPost?.entities ?? [];
+		const text = ctx.message?.text ?? ctx.channelPost?.text ?? "";
 		for (const e of entities) {
 			if (e.type === "bot_command") {
 				const command = text.slice(e.offset, e.offset + e.length);

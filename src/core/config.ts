@@ -41,7 +41,6 @@ export const BaseConfigSchema = z.object({
 	defaultProject: z.string().default("self"),
 	model: z.string().default("sonnet"),
 	maxTurns: z.number().default(10),
-	maxSessionsPerUser: z.number().default(10),
 	sessionTimeoutHours: z.number().default(24),
 	plugins: z.record(z.string(), z.unknown()).default({}),
 });
@@ -131,7 +130,6 @@ export class ConfigManager {
 			model:
 				"string — Claude model alias (sonnet, opus, haiku) or full ID (default: 'sonnet')",
 			maxTurns: "number — Max conversation turns per query (default: 10)",
-			maxSessionsPerUser: "number — Max sessions per user (default: 10)",
 			sessionTimeoutHours: "number — Session timeout in hours (default: 24)",
 			plugins: "object — Plugin-specific configuration (keyed by plugin name)",
 		};
@@ -164,7 +162,6 @@ export class ConfigManager {
   "maxTurns": 10,
 
   // Sessions
-  "maxSessionsPerUser": 10,
   "sessionTimeoutHours": 24,
 
   // Plugin-specific configs

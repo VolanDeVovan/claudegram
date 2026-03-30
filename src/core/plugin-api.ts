@@ -68,6 +68,7 @@ export interface ToolDefinition {
 	name: string;
 	description: string;
 	schema: ZodType;
+	scope?: "self" | "all" | string[];
 	handler: (input: unknown, ctx: PluginContext) => Promise<string>;
 }
 

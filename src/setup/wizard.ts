@@ -5,7 +5,7 @@ import { GenerationManager } from "@core/generation-manager.ts";
 import { Bot } from "grammy";
 
 const TEMPLATES_DIR = resolve(join(import.meta.dir, "..", "templates"));
-const STARTER_TEMPLATES = ["auth.ts", "ack-reaction.ts"];
+const STARTER_TEMPLATES = ["ack-reaction.ts"];
 
 export async function runWizard(
 	configPath: string,

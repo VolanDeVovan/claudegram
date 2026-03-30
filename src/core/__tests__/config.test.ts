@@ -20,7 +20,6 @@ beforeEach(async () => {
   "defaultProject": "self",
   "model": "claude-sonnet-4",
   "maxTurns": 10,
-  "maxSessionsPerUser": 10,
   "sessionTimeoutHours": 24,
   "plugins": {}
 }`,

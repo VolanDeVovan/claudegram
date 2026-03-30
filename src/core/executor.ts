@@ -152,28 +152,33 @@ export class Executor {
 
 		// Build MCP server for tools (core + plugin)
 		const allTools = [...this.coreTools];
-		if (isSelf) {
-			for (const { tool } of loaded.tools) {
-				allTools.push({
-					name: tool.name,
-					description: tool.description,
-					inputSchema: {},
-					handler: async (args) => {
-						log.info("Tool call: {tool}", { tool: tool.name, args });
-						const start = Date.now();
-						const result = await tool.handler(args, {
-							bot: this.bot,
-							config: this.config,
-							db: this.bot.botInfo as any, // placeholder, actual db passed via server
-							query: this.createQueryFn(),
-							sessions: this.sessionManager,
-						});
-						const ms = Date.now() - start;
-						log.info("Tool done: {tool} ({ms}ms)", { tool: tool.name, ms });
-						return { content: [{ type: "text" as const, text: result }] };
-					},
-				});
-			}
+		for (const { tool } of loaded.tools) {
+			const scope = tool.scope ?? "self";
+			const allowed =
+				scope === "all" ||
+				(scope === "self" && isSelf) ||
+				(Array.isArray(scope) && scope.includes(project));
+			if (!allowed) continue;
+
+			allTools.push({
+				name: tool.name,
+				description: tool.description,
+				inputSchema: {},
+				handler: async (args) => {
+					log.info("Tool call: {tool}", { tool: tool.name, args });
+					const start = Date.now();
+					const result = await tool.handler(args, {
+						bot: this.bot,
+						config: this.config,
+						db: this.bot.botInfo as any, // placeholder, actual db passed via server
+						query: this.createQueryFn(),
+						sessions: this.sessionManager,
+					});
+					const ms = Date.now() - start;
+					log.info("Tool done: {tool} ({ms}ms)", { tool: tool.name, ms });
+					return { content: [{ type: "text" as const, text: result }] };
+				},
+			});
 		}
 
 		// Build SDK options
@@ -309,6 +314,7 @@ export class Executor {
 		let resultSessionId: string | undefined;
 		let turns = 0;
 		let costUsd = 0;
+		let hadTextOutput = false;
 
 		try {
 			const q = sdkQuery({ prompt, options: sdkOptions });
@@ -320,8 +326,11 @@ export class Executor {
 					// Extract text from assistant message content blocks
 					for (const block of msg.message.content) {
 						if (block.type === "text") {
-							yield { type: "text_delta", delta: block.text };
-							totalText += block.text;
+							// Separate text from different assistant turns
+							const sep = hadTextOutput && block.text.length > 0 ? "\n\n" : "";
+							yield { type: "text_delta", delta: sep + block.text };
+							totalText += sep + block.text;
+							hadTextOutput = true;
 						} else if (block.type === "thinking") {
 							yield {
 								type: "thinking_delta",
@@ -376,8 +385,11 @@ export class Executor {
 						if (msg.type === "assistant") {
 							for (const block of msg.message.content) {
 								if (block.type === "text") {
-									yield { type: "text_delta", delta: block.text };
-									totalText += block.text;
+									const sep =
+										hadTextOutput && block.text.length > 0 ? "\n\n" : "";
+									yield { type: "text_delta", delta: sep + block.text };
+									totalText += sep + block.text;
+									hadTextOutput = true;
 								}
 							}
 							resultSessionId = msg.session_id;
