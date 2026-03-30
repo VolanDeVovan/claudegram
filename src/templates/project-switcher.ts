@@ -35,7 +35,7 @@ export default definePlugin({
 			if (!data?.startsWith(PREFIX)) return next();
 
 			const projectName = data.slice(PREFIX.length);
-			const userId = String(ctx.from!.id);
+			const userId = String(ctx.from?.id);
 			const sessions = ctx.pluginContext.sessions as SessionManager;
 			const config = ctx.pluginContext.config;
 			const projects = config.data.projects;
@@ -63,7 +63,7 @@ export default definePlugin({
 		project: {
 			description: "Switch project or list available projects",
 			handler: async (ctx) => {
-				const userId = String(ctx.from!.id);
+				const userId = String(ctx.from?.id);
 				const sessions = ctx.pluginContext.sessions as SessionManager;
 				const config = ctx.pluginContext.config;
 				const projects = config.data.projects;

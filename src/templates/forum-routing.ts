@@ -36,7 +36,7 @@ export default definePlugin({
 			const projectName = cfg?.threadMap?.[threadKey];
 
 			if (projectName) {
-				const userId = String(ctx.from!.id);
+				const userId = String(ctx.from?.id);
 				const sessions = ctx.pluginContext.sessions as SessionManager;
 				// Switch active project to match the forum topic
 				sessions.setActiveProject(userId, projectName);

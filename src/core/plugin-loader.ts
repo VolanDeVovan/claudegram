@@ -3,12 +3,7 @@ import { extname, join, resolve } from "node:path";
 import { getLogger } from "@logtape/logtape";
 import { Composer } from "grammy";
 import type { ConfigManager } from "./config.ts";
-import type {
-	BotContext,
-	CommandDefinition,
-	Plugin,
-	PluginContext,
-} from "./plugin-api.ts";
+import type { BotContext, Plugin, PluginContext } from "./plugin-api.ts";
 
 const log = getLogger(["bot", "plugin-loader"]);
 

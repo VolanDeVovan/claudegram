@@ -45,7 +45,7 @@ describe("Database", () => {
 				"SELECT MAX(version) as version FROM schema_version",
 			)
 			.get();
-		expect(version!.version).toBeGreaterThan(0);
+		expect(version?.version).toBeGreaterThan(0);
 		db2.close();
 	});
 
@@ -63,8 +63,8 @@ describe("Database", () => {
 			)
 			.get("session-1");
 
-		expect(row!.id).toBe("session-1");
-		expect(row!.user_id).toBe("user-1");
+		expect(row?.id).toBe("session-1");
+		expect(row?.user_id).toBe("user-1");
 		db.close();
 	});
 
@@ -81,7 +81,7 @@ describe("Database", () => {
 			)
 			.get("user-1");
 
-		expect(row!.active_project).toBe("api-backend");
+		expect(row?.active_project).toBe("api-backend");
 		db.close();
 	});
 });

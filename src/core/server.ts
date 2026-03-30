@@ -1,9 +1,8 @@
-import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { sequentialize } from "@grammyjs/runner";
 import { getLogger } from "@logtape/logtape";
 import { runWizard } from "@setup/wizard.ts";
-import { Bot, Composer, type MiddlewareFn } from "grammy";
+import { Bot, type MiddlewareFn } from "grammy";
 import { ConfigManager } from "./config.ts";
 import { createPluginCommands, registerCoreCommands } from "./core-commands.ts";
 import { createCoreTools } from "./core-tools.ts";
@@ -309,7 +308,7 @@ async function main() {
 		await sessionManager.withSessionLock(userId, project, async (signal) => {
 			await executor.handleMessage(
 				{
-					message: ctx.message.text!,
+					message: ctx.message.text ?? "",
 					userId,
 					project,
 					signal,

@@ -45,7 +45,7 @@ export function initDatabase(dbPath: string): Database {
 	const currentVersion = row?.version ?? 0;
 
 	for (let i = currentVersion; i < MIGRATIONS.length; i++) {
-		const sql = MIGRATIONS[i]!;
+		const sql = MIGRATIONS[i] as string;
 		db.exec(sql);
 		db.exec(
 			`INSERT INTO schema_version (version, applied_at) VALUES (${i + 1}, '${new Date().toISOString()}')`,

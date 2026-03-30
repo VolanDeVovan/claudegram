@@ -75,7 +75,6 @@ Never modify src/. Only write to plugins/.
 Your text output is automatically sent to the user's Telegram chat.
 You don't need special tools to reply — just write your response.`;
 
-
 function createMcpServerConfig(tools: SdkMcpToolDefinition[]) {
 	return createSdkMcpServer({
 		name: "claudegram-core",
@@ -141,7 +140,7 @@ export class Executor {
 					const result = await tool.handler(args, {
 						bot: this.bot,
 						config: this.config,
-						db: this.bot.botInfo as any, // placeholder, actual db passed via server
+						db: this.bot.botInfo as unknown as typeof import("../core/database.ts").db, // placeholder, actual db passed via server
 						query: this.createQueryFn(),
 						sessions: this.sessionManager,
 					});
@@ -160,7 +159,7 @@ export class Executor {
 			settingSources: ["user", "project", "local"],
 			abortController: opts.signal
 				? ({
-						abort: () => opts.signal!.dispatchEvent(new Event("abort")),
+						abort: () => opts.signal?.dispatchEvent(new Event("abort")),
 						signal: opts.signal,
 					} as AbortController)
 				: undefined,
@@ -170,7 +169,7 @@ export class Executor {
 		};
 
 		// Add MCP servers
-		const mcpServers: Record<string, any> = {};
+		const mcpServers: Record<string, unknown> = {};
 		if (isSelf && allTools.length > 0) {
 			mcpServers["claudegram-core"] = createMcpServerConfig(allTools);
 		}
@@ -303,7 +302,7 @@ export class Executor {
 						} else if (block.type === "thinking") {
 							yield {
 								type: "thinking_delta",
-								delta: (block as any).thinking ?? "",
+								delta: (block as Record<string, string>).thinking ?? "",
 							};
 						} else if (block.type === "tool_use") {
 							yield {
@@ -412,7 +411,7 @@ export class Executor {
 		}
 
 		const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-		log.info("Query complete: {turns} turns, ${cost}, {duration}s", {
+		log.info("Query complete: {turns} turns, {cost}, {duration}s", {
 			turns,
 			cost: costUsd.toFixed(4),
 			duration,

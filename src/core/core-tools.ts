@@ -2,7 +2,6 @@ import type { SdkMcpToolDefinition } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { ConfigManager } from "./config.ts";
 import type { GenerationManager } from "./generation-manager.ts";
-import type { PluginContext } from "./plugin-api.ts";
 import type { LoadedPlugins } from "./plugin-loader.ts";
 
 export function createCoreTools(

@@ -13,16 +13,16 @@ const TEST_DIR = join(import.meta.dir, ".test-data-plugins");
 const PLUGINS_DIR = join(TEST_DIR, "plugins");
 
 const mockPluginCtx = {
-	bot: {} as any,
-	config: { registerPluginSchema: () => {} } as any,
-	db: {} as any,
-	query: (() => {}) as any,
-	sessions: {} as any,
-} satisfies PluginContext;
+	bot: {} as unknown,
+	config: { registerPluginSchema: () => {} } as unknown,
+	db: {} as unknown,
+	query: (() => {}) as unknown,
+	sessions: {} as unknown,
+} as PluginContext;
 
 const mockConfig = {
 	registerPluginSchema: () => {},
-} as any;
+} as unknown as PluginContext["config"];
 
 beforeEach(async () => {
 	if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
@@ -47,7 +47,7 @@ describe("Plugin Loader", () => {
 
 		const loaded = await loadPlugins(PLUGINS_DIR, mockPluginCtx, mockConfig);
 		expect(loaded.plugins).toHaveLength(1);
-		expect(loaded.plugins[0]!.name).toBe("test-plugin");
+		expect(loaded.plugins[0]?.name).toBe("test-plugin");
 		expect(loaded.errors).toHaveLength(0);
 	});
 
@@ -98,7 +98,7 @@ describe("Plugin Loader", () => {
 		const loaded = await loadPlugins(PLUGINS_DIR, mockPluginCtx, mockConfig);
 		expect(loaded.commands.has("hello")).toBe(true);
 		expect(loaded.commands.has("world")).toBe(true);
-		expect(loaded.commands.get("world")!.description).toBe("World command");
+		expect(loaded.commands.get("world")?.description).toBe("World command");
 	});
 
 	test("collects authCheck hooks", async () => {
@@ -123,7 +123,7 @@ describe("Plugin Loader", () => {
 		const loaded = await loadPlugins(PLUGINS_DIR, mockPluginCtx, mockConfig);
 		expect(loaded.plugins).toHaveLength(0);
 		expect(loaded.errors).toHaveLength(1);
-		expect(loaded.errors[0]!.error).toContain("Missing plugin name");
+		expect(loaded.errors[0]?.error).toContain("Missing plugin name");
 	});
 
 	test("calls dispose on plugins", async () => {

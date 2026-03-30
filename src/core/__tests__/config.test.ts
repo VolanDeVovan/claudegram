@@ -37,7 +37,7 @@ describe("ConfigManager", () => {
 		expect(config.data.owner).toBe("123456");
 		expect(config.data.model).toBe("claude-sonnet-4");
 		expect(config.data.projects).toHaveLength(1);
-		expect(config.data.projects[0]!.name).toBe("self");
+		expect(config.data.projects[0]?.name).toBe("self");
 	});
 
 	test("get by key path", () => {

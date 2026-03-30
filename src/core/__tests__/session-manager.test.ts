@@ -42,9 +42,9 @@ describe("SessionManager", () => {
 		sm.createSession("sess-1", "user-1", "self");
 		const active = sm.getActive("user-1", "self");
 		expect(active).not.toBeNull();
-		expect(active!.id).toBe("sess-1");
-		expect(active!.projectName).toBe("self");
-		expect(active!.isActive).toBe(true);
+		expect(active?.id).toBe("sess-1");
+		expect(active?.projectName).toBe("self");
+		expect(active?.isActive).toBe(true);
 		db.close();
 	});
 
@@ -81,11 +81,11 @@ describe("SessionManager", () => {
 		sm.createSession("sess-2", "user-1", "self");
 
 		// sess-2 is active now
-		expect(sm.getActive("user-1", "self")!.id).toBe("sess-2");
+		expect(sm.getActive("user-1", "self")?.id).toBe("sess-2");
 
 		// Activate sess-1
 		sm.activate("sess-1");
-		expect(sm.getActive("user-1", "self")!.id).toBe("sess-1");
+		expect(sm.getActive("user-1", "self")?.id).toBe("sess-1");
 		db.close();
 	});
 
@@ -117,8 +117,8 @@ describe("SessionManager", () => {
 		sm.updateSession("sess-1", 5, 0.05);
 
 		const session = sm.getActive("user-1", "self");
-		expect(session!.turns).toBe(5);
-		expect(session!.costUsd).toBeCloseTo(0.05);
+		expect(session?.turns).toBe(5);
+		expect(session?.costUsd).toBeCloseTo(0.05);
 		db.close();
 	});
 

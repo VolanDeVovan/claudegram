@@ -52,7 +52,7 @@ export default definePlugin({
 			if (!data?.startsWith(PREFIX)) return next();
 
 			const sessionId = data.slice(PREFIX.length);
-			const userId = String(ctx.from!.id);
+			const userId = String(ctx.from?.id);
 			const sessions = ctx.pluginContext.sessions;
 			const allSessions = sessions.list(userId);
 			const target = allSessions.find((s) => s.id === sessionId);
@@ -80,7 +80,7 @@ export default definePlugin({
 		sessions: {
 			description: "List all sessions for the current project",
 			handler: async (ctx) => {
-				const userId = String(ctx.from!.id);
+				const userId = String(ctx.from?.id);
 				const allSessions = ctx.pluginContext.sessions.list(userId);
 
 				if (!allSessions.length) {
@@ -97,11 +97,11 @@ export default definePlugin({
 			description: "Resume a specific session by number (e.g. /resume 3)",
 			handler: async (ctx) => {
 				const arg = (ctx.match as string)?.trim();
-				const num = Number.parseInt(arg);
+				const num = Number.parseInt(arg, 10);
 
 				if (!arg || Number.isNaN(num)) {
 					// No valid number — show keyboard
-					const userId = String(ctx.from!.id);
+					const userId = String(ctx.from?.id);
 					const allSessions = ctx.pluginContext.sessions.list(userId);
 					if (!allSessions.length) {
 						await ctx.reply("No sessions found.");
@@ -112,7 +112,7 @@ export default definePlugin({
 					return;
 				}
 
-				const userId = String(ctx.from!.id);
+				const userId = String(ctx.from?.id);
 				const allSessions = ctx.pluginContext.sessions.list(userId);
 				const target = allSessions[num - 1];
 
@@ -133,7 +133,7 @@ export default definePlugin({
 		continue: {
 			description: "Resume the most recent inactive session",
 			handler: async (ctx) => {
-				const userId = String(ctx.from!.id);
+				const userId = String(ctx.from?.id);
 				const allSessions = ctx.pluginContext.sessions.list(userId);
 				const latest = allSessions
 					.filter((s) => !s.isActive)

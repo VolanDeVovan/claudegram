@@ -9,8 +9,8 @@ const startedAt = Date.now();
 export function registerCoreCommands(
 	bot: Bot<BotContext>,
 	sessionManager: SessionManager,
-	config: ConfigManager,
-	getLoadedPlugins: () => LoadedPlugins,
+	_config: ConfigManager,
+	_getLoadedPlugins: () => LoadedPlugins,
 ): void {
 	// /cancel and /ping bypass sequentialize — registered BEFORE middleware
 	bot.command("cancel", async (ctx) => {
@@ -41,7 +41,7 @@ export function createPluginCommands(
 	return {
 		start: async (ctx) => {
 			const plugins = getLoadedPlugins();
-			const project = sessionManager.getActiveProject(String(ctx.from?.id));
+			const _project = sessionManager.getActiveProject(String(ctx.from?.id));
 			const projects = config.data.projects.filter((p) => p.name !== "self");
 			const pluginList =
 				plugins.plugins.map((p) => p.name).join(", ") || "none";

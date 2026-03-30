@@ -34,8 +34,8 @@ describe("GenerationManager", () => {
 
 		const gens = gm.list();
 		expect(gens).toHaveLength(1);
-		expect(gens[0]!.description).toBe("test generation");
-		expect(gens[0]!.plugins).toContain("test");
+		expect(gens[0]?.description).toBe("test generation");
+		expect(gens[0]?.plugins).toContain("test");
 	});
 
 	test("creates multiple generations", () => {

@@ -84,7 +84,7 @@ export class ConfigManager {
 
 		// Validate plugin configs against their schemas
 		if (path[0] === "plugins" && path.length >= 2) {
-			const pluginName = path[1]!;
+			const pluginName = path[1] as string;
 			const schema = this.pluginSchemas.get(pluginName);
 			if (schema && path.length === 2) {
 				schema.parse(value);
@@ -133,7 +133,7 @@ export class ConfigManager {
 			plugins: "object — Plugin-specific configuration (keyed by plugin name)",
 		};
 
-		for (const [name, schema] of this.pluginSchemas) {
+		for (const [name, _schema] of this.pluginSchemas) {
 			descriptions[`plugins.${name}`] = `object — Config for plugin '${name}'`;
 		}
 

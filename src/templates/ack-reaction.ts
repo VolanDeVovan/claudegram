@@ -24,6 +24,7 @@ export default definePlugin({
 					"plugins.ack-reaction",
 				);
 				try {
+					// biome-ignore lint/suspicious/noExplicitAny: grammy react() typing doesn't accept dynamic strings
 					await ctx.react((cfg?.emoji ?? "👀") as any);
 				} catch {
 					// Reaction might fail in some chat types
