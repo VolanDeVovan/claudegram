@@ -16,7 +16,7 @@
 12. `src/core/server.ts` — bootstrap: config load → stale filter → dedup → /cancel+/ping bypass → owner auth → sequentialize → plugin scan → swappable middleware → bot start
 13. `src/setup/wizard.ts` — визард (2 вопроса, создание data/ + plugins/, копирование стартовых плагинов, gen-001)
 
-**Результат:** ядро запускается, загружает плагины, генерации работают, сессии персистентны с multi-session и concurrency, hot-reload без остановки polling, Claude ограничен в записи, только owner имеет доступ. Stale/dedup фильтры защищают от дублей и старых сообщений. /cancel прерывает query. Watchdog логирует зависшие запросы.
+**Результат:** ядро запускается, загружает плагины, генерации работают, сессии персистентны с multi-session и concurrency, hot-reload без остановки polling, Claude ограничен в записи, только owner имеет доступ. Stale/dedup фильтры защищают от дублей и старых сообщений. /cancel прерывает query. Watchdog логирует зависшие запросы. SDK автоматически подхватывает CLAUDE.md, MCP серверы и скиллы через `settingSources`.
 
 ## Phase 2: Base Templates
 
@@ -32,7 +32,7 @@
 18. Переключение проектов (через плагин — команды, кнопки, или треды)
 19. Executor: project-aware режимы (sandbox для self, стандартный для остальных)
 
-**Результат:** можно работать с несколькими проектами, переключение через чат.
+**Результат:** можно работать с несколькими проектами, переключение через чат. CLAUDE.md, MCP серверы и скиллы каждого проекта подхватываются автоматически.
 
 ## Phase 4: Media + More Templates
 

@@ -21,12 +21,28 @@ const newContent = applyEdits(fileContent, edits);
 ### Базовая схема (`src/core/config.ts`)
 
 ```typescript
+const McpServerSchema = z.union([
+  z.object({
+    name: z.string(),
+    type: z.enum(["http", "sse"]),
+    url: z.string(),
+    headers: z.record(z.string()).optional(),
+  }),
+  z.object({
+    name: z.string(),
+    command: z.string(),
+    args: z.array(z.string()).optional(),
+    env: z.record(z.string()).optional(),
+  }),
+]);
+
 const ProjectSchema = z.object({
   name: z.string(),
   path: z.string(),
   description: z.string().optional(),
   model: z.string().optional(),
   systemPrompt: z.string().optional(),
+  mcpServers: z.array(McpServerSchema).optional(),  // дополнительные MCP серверы (поверх .mcp.json проекта)
 });
 
 const BaseConfigSchema = z.object({
@@ -105,7 +121,15 @@ configSchema: z.object({
     {
       "name": "api-backend",
       "path": "/home/me/projects/api",
-      "description": "REST API service"
+      "description": "REST API service",
+      // MCP серверы поверх .mcp.json проекта (опционально)
+      "mcpServers": [
+        {
+          "name": "postgres",
+          "command": "mcp-server-postgres",
+          "args": ["postgresql://localhost/api"]
+        }
+      ]
     }
   ],
   "defaultProject": "self",

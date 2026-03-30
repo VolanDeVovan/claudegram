@@ -109,12 +109,15 @@ Core проверяет `config.owner` на каждое входящее соо
 
 Executor создаёт Claude query по-разному в зависимости от активного проекта.
 
+Общее для обоих режимов: SDK автоматически подхватывает CLAUDE.md файлы и `.claude/commands/` (скиллы) через `settingSources: ["user", "project", "local"]`.
+
 ### Проект `self` (бот управляет собой)
 
 - **Sandbox**: write only to `plugins/`, контекстные reject'ы
 - **MCP tools**: core tools (config_get/set, plugin_list, reload, generations) + тулы из плагинов
 - **System prompt**: инструкции по самоконфигурации (см. [system-prompt.md](system-prompt.md))
 - **Working directory**: корень бота
+- **settingSources**: `["user", "project", "local"]` — SDK подхватывает CLAUDE.md бота
 
 ```typescript
 // canUseTool для проекта self
@@ -161,9 +164,11 @@ canUseTool: (tool, input) => {
 ### Любой другой проект
 
 - **Sandbox**: нет ограничений — полный auto-approve, стандартный Claude Code
-- **MCP tools**: нет core tools бота. Подхватывает `.mcp.json` проекта если есть
+- **MCP tools**: нет core tools бота. SDK подхватывает MCP серверы проекта
 - **System prompt**: стандартный, без инструкций по самоконфигурации бота
 - **Working directory**: `project.path`
+- **settingSources**: `["user", "project", "local"]` — SDK подхватывает CLAUDE.md проекта, `.claude/settings.json`, `.claude/commands/` (скиллы)
+- **MCP серверы**: передаются из конфига проекта (`project.mcpServers`) + SDK подхватывает `.mcp.json` из `project.path`
 
 ```typescript
 // canUseTool для внешних проектов — полный auto-approve
@@ -173,6 +178,27 @@ canUseTool: (tool, input) => {
 ```
 
 Переключение между режимами происходит автоматически при смене активного проекта.
+
+### Общие параметры SDK
+
+Оба режима передают в `query()`:
+
+```typescript
+const options: Options = {
+  cwd: project.path,
+  settingSources: ["user", "project", "local"],  // CLAUDE.md, .claude/settings.json
+  mcpServers: {
+    ...project.mcpServers,  // из конфига проекта (если есть)
+  },
+  // ... mode-specific options (systemPrompt, canUseTool, tools)
+};
+```
+
+SDK автоматически:
+- Читает `{cwd}/CLAUDE.md` и вложенные CLAUDE.md
+- Читает `~/.claude/CLAUDE.md` (user level)
+- Обнаруживает `.claude/commands/*.md` (скиллы) и отдаёт как доступные команды
+- Подхватывает `.claude/settings.json` (permission mode, env vars)
 
 ### Approval Hook (chain logic)
 

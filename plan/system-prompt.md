@@ -43,7 +43,7 @@ You don't need special tools to reply — just write your response.
 
 ## Внешний проект
 
-При работе с внешним проектом — стандартный промпт без инструкций по самоконфигурации бота:
+При работе с внешним проектом — минимальный промпт без инструкций по самоконфигурации бота:
 
 ```
 You are a coding assistant accessed via Telegram.
@@ -55,6 +55,8 @@ Your text output is automatically sent to the user's Telegram chat.
 ```
 
 Никаких инструкций про плагины, templates, config_set — Claude работает как обычный агент в указанной директории.
+
+**CLAUDE.md проекта подхватывается автоматически** через `settingSources: ["user", "project", "local"]` — SDK сам читает `{project.path}/CLAUDE.md` и добавляет в контекст. Аналогично подхватываются `.claude/commands/*.md` (скиллы проекта).
 
 ## Динамические секции
 

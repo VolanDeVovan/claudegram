@@ -27,6 +27,9 @@
 | Executor mode | Project-aware: sandbox для self, стандартный для остальных | Бот управляет собой через тулы, внешние проекты — как обычный Claude Code |
 | Concurrency | Sequential lock per userId+project, параллельные query между проектами | Один query за раз в рамках проекта, но юзер может переключиться и работать с другим проектом параллельно |
 | Timeouts | Нет таймаута на Claude query | Query может работать минуты или часы (фоновые задачи). Typing indicator heartbeat пока query идёт |
+| CLAUDE.md | `settingSources: ["user", "project", "local"]` — SDK подхватывает автоматически | Не парсим руками. SDK читает `{cwd}/CLAUDE.md`, `~/.claude/CLAUDE.md`, `.claude/settings.json` |
+| MCP серверы | Передаём в SDK через `mcpServers` option + SDK подхватывает `.mcp.json` | Конфиг проекта может указать дополнительные MCP серверы поверх `.mcp.json` |
+| Скиллы (slash commands) | SDK обнаруживает `.claude/commands/*.md` автоматически | Проектные скиллы работают без дополнительного кода в боте |
 
 ## Почему не отдельные тулы для projects/users
 

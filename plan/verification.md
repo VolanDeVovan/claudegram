@@ -74,6 +74,14 @@
 
 38. "Добавь проект /home/me/api" → config_set обновляет projects → Claude предлагает способ переключения
 
+## CLAUDE.md, MCP, Скиллы
+
+48. Внешний проект с CLAUDE.md → SDK подхватывает инструкции, Claude следует им
+49. Внешний проект с `.mcp.json` → MCP серверы подключаются, тулы доступны Claude
+50. Внешний проект с `.claude/commands/deploy.md` → скилл `/deploy` доступен
+51. Проект с `mcpServers` в конфиге → MCP серверы передаются в SDK и работают
+52. Проект `self` → CLAUDE.md бота подхватывается, не конфликтует с system prompt самоконфигурации
+
 ## Stale/Dedup/Cancel/Watchdog
 
 39. Рестарт бота → старые сообщения (до boot) игнорируются
