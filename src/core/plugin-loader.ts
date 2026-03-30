@@ -1,6 +1,5 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { getLogger } from "@logtape/logtape";
 import { Composer } from "grammy";
 import type { ConfigManager } from "./config.ts";
@@ -13,15 +12,25 @@ import type {
 
 const log = getLogger(["bot", "plugin-loader"]);
 
-async function hotImport<T>(filePath: string): Promise<T> {
-	const absolute = resolve(filePath);
-	const base = pathToFileURL(absolute).href;
-	try {
-		const { mtimeMs, size } = statSync(absolute);
-		const url = `${base}?t=${mtimeMs}&s=${size}`;
-		return (await import(url)) as T;
-	} catch {
-		return (await import(`${base}?t=${Date.now()}`)) as T;
+/**
+ * Evict all plugin files from Bun's module cache.
+ *
+ * Bun ignores query-string cache busters on file:// URLs,
+ * so we clear require.cache entries for the entire plugins directory
+ * before re-importing. This covers single-file plugins, directory
+ * plugins, and their nested dependencies.
+ */
+function evictPluginCache(pluginsDir: string): void {
+	const absolute = resolve(pluginsDir);
+	let evicted = 0;
+	for (const key of Object.keys(require.cache)) {
+		if (key.startsWith(absolute)) {
+			delete require.cache[key];
+			evicted++;
+		}
+	}
+	if (evicted > 0) {
+		log.info("Evicted {count} modules from cache", { count: evicted });
 	}
 }
 
@@ -84,11 +93,13 @@ export async function loadPlugins(
 		commands: new Map(),
 	};
 
+	evictPluginCache(pluginsDir);
+
 	const loaded: Array<{ plugin: Plugin; path: string }> = [];
 
 	for (const path of paths) {
 		try {
-			const mod = await hotImport<{ default: Plugin }>(path);
+			const mod = (await import(resolve(path))) as { default: Plugin };
 			const plugin = mod.default;
 			if (!plugin?.name) {
 				result.errors.push({ path, error: "Missing plugin name" });

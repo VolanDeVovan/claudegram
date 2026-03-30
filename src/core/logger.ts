@@ -1,7 +1,12 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { getRotatingFileSink } from "@logtape/file";
-import { configure, getConsoleSink, getLogger } from "@logtape/logtape";
+import {
+	configure,
+	getConsoleSink,
+	getLogger,
+	jsonLinesFormatter,
+} from "@logtape/logtape";
 import { getPrettyFormatter } from "@logtape/pretty";
 
 export async function initLogger(logDir: string): Promise<void> {
@@ -11,6 +16,7 @@ export async function initLogger(logDir: string): Promise<void> {
 	await configure({
 		sinks: {
 			file: getRotatingFileSink(logFile, {
+				formatter: jsonLinesFormatter,
 				maxSize: 5 * 1024 * 1024,
 				maxFiles: 3,
 			}),
