@@ -1,13 +1,16 @@
 /**
  * @plugin session-switcher
- * @description Switch between sessions within a project.
- *   Adds /sessions (list), /resume (pick from list), /continue (resume latest).
+ * @description Switch between sessions within a project via inline keyboard.
+ *   Adds /sessions (keyboard list), /resume (pick by number or keyboard),
+ *   /continue (resume latest inactive).
  *   Uses ctx.pluginContext.sessions API from core.
- *   This is a starting point — user can adapt: add inline keyboards,
- *   auto-resume on bot restart, session naming, etc.
  * @priority 50
  */
 import { definePlugin } from "@core/plugin-api.ts";
+import { InlineKeyboard } from "grammy";
+
+const PREFIX = "sess:";
+const MAX_SESSIONS = 10;
 
 function timeSince(dateStr: string): string {
 	const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
@@ -20,45 +23,98 @@ function timeSince(dateStr: string): string {
 	return `${days}d`;
 }
 
+function buildKeyboard(
+	sessions: {
+		id: string;
+		projectName: string;
+		turns: number;
+		lastUsed: string;
+		isActive: boolean;
+	}[],
+): InlineKeyboard {
+	const kb = new InlineKeyboard();
+	for (const s of sessions.slice(0, MAX_SESSIONS)) {
+		const label = `${s.isActive ? "▸ " : ""}${s.projectName} — ${s.turns} turns, ${timeSince(s.lastUsed)} ago`;
+		kb.text(label, `${PREFIX}${s.id}`).row();
+	}
+	return kb;
+}
+
 export default definePlugin({
 	name: "session-switcher",
-	description: "Switch between sessions (/sessions, /resume, /continue)",
+	description:
+		"Switch between sessions via inline keyboard (/sessions, /resume, /continue)",
 	priority: 50,
+
+	middleware: [
+		async (ctx, next) => {
+			const data = ctx.callbackQuery?.data;
+			if (!data?.startsWith(PREFIX)) return next();
+
+			const sessionId = data.slice(PREFIX.length);
+			const userId = String(ctx.from!.id);
+			const sessions = ctx.pluginContext.sessions;
+			const allSessions = sessions.list(userId);
+			const target = allSessions.find((s) => s.id === sessionId);
+
+			if (!target) {
+				await ctx.answerCallbackQuery({
+					text: "Session no longer exists",
+					show_alert: true,
+				});
+				return;
+			}
+
+			sessions.activate(target.id);
+
+			const updated = sessions.list(userId);
+			const kb = buildKeyboard(updated);
+			await ctx.editMessageText("Sessions:", { reply_markup: kb });
+			await ctx.answerCallbackQuery({
+				text: `Resumed ${target.projectName} (${target.turns} turns)`,
+			});
+		},
+	],
 
 	commands: {
 		sessions: {
 			description: "List all sessions for the current project",
 			handler: async (ctx) => {
 				const userId = String(ctx.from!.id);
-				const sessions = ctx.pluginContext.sessions.list(userId);
+				const allSessions = ctx.pluginContext.sessions.list(userId);
 
-				if (!sessions.length) {
+				if (!allSessions.length) {
 					await ctx.reply("No sessions found.");
 					return;
 				}
 
-				const lines = sessions.map(
-					(s, i) =>
-						`${s.isActive ? "▸" : " "} ${i + 1}. ${s.projectName} — ${s.turns} turns, ${timeSince(s.lastUsed)} ago`,
-				);
-				await ctx.reply(lines.join("\n"));
+				const kb = buildKeyboard(allSessions);
+				await ctx.reply("Sessions:", { reply_markup: kb });
 			},
 		},
 
 		resume: {
 			description: "Resume a specific session by number (e.g. /resume 3)",
 			handler: async (ctx) => {
-				const num = Number.parseInt(ctx.match as string);
-				if (Number.isNaN(num)) {
-					await ctx.reply(
-						"Usage: /resume <number>. Use /sessions to see the list.",
-					);
+				const arg = (ctx.match as string)?.trim();
+				const num = Number.parseInt(arg);
+
+				if (!arg || Number.isNaN(num)) {
+					// No valid number — show keyboard
+					const userId = String(ctx.from!.id);
+					const allSessions = ctx.pluginContext.sessions.list(userId);
+					if (!allSessions.length) {
+						await ctx.reply("No sessions found.");
+						return;
+					}
+					const kb = buildKeyboard(allSessions);
+					await ctx.reply("Sessions:", { reply_markup: kb });
 					return;
 				}
 
 				const userId = String(ctx.from!.id);
-				const sessions = ctx.pluginContext.sessions.list(userId);
-				const target = sessions[num - 1];
+				const allSessions = ctx.pluginContext.sessions.list(userId);
+				const target = allSessions[num - 1];
 
 				if (!target) {
 					await ctx.reply(
@@ -78,8 +134,8 @@ export default definePlugin({
 			description: "Resume the most recent inactive session",
 			handler: async (ctx) => {
 				const userId = String(ctx.from!.id);
-				const sessions = ctx.pluginContext.sessions.list(userId);
-				const latest = sessions
+				const allSessions = ctx.pluginContext.sessions.list(userId);
+				const latest = allSessions
 					.filter((s) => !s.isActive)
 					.sort(
 						(a, b) =>
@@ -93,7 +149,7 @@ export default definePlugin({
 
 				ctx.pluginContext.sessions.activate(latest.id);
 				await ctx.reply(
-					`Continued session (${latest.turns} turns, ${timeSince(latest.lastUsed)} ago).`,
+					`Continued session in ${latest.projectName} (${latest.turns} turns, ${timeSince(latest.lastUsed)} ago).`,
 				);
 			},
 		},
