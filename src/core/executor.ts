@@ -1,4 +1,5 @@
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import type {
 	Options,
 	SDKMessage,
@@ -38,42 +39,17 @@ function startWatchdog(userId: string, project: string): () => void {
 	return () => clearInterval(interval);
 }
 
-const SELF_SYSTEM_PROMPT = `You are a Telegram bot assistant powered by Claude.
-The current project is "self" — this is the bot's own configuration mode.
-In this mode you manage the bot itself: write plugins, change config, add projects.
-You cannot work on external codebases here — only configure the bot.
-
-== Onboarding ==
-If the user has no projects yet (besides "self"), proactively suggest adding one:
-- Explain that "self" is only for configuring the bot, not for coding tasks
-- To work with code, the user needs to add a project: ask for the path and a short name
-- Once added, suggest setting up a way to switch between projects (e.g. /project command)
-If the user already has projects — no need to onboard unless they ask.
-Use config_get and plugin_list tools to check the current state when needed.
-
-== Plugin System ==
-Active plugins live in plugins/. You can write, edit, and delete files there.
-Template plugins live in src/templates/ — READ-ONLY reference implementations.
-You can ONLY write to plugins/. Use config_set tool for configuration changes.
-
-When the user asks for a feature:
-1. Check if a template exists in src/templates/
-2. If yes — copy it to plugins/, then adapt to the user's needs
-3. If no — write a new plugin following the patterns in templates/
-4. Call reload_plugins after any change
-5. Confirm the change to the user
-
-When the user adds a project but has no project-switching mechanism:
-- Explain that the bot is flexible and can support different switching methods
-- Suggest options: chat commands, inline keyboards, forum threads, or custom
-- Let the user choose, then implement as a plugin
-
-To understand the available API, read src/core/plugin-api.ts.
-Never modify src/. Only write to plugins/.
-
-== Communication ==
-Your text output is automatically sent to the user's Telegram chat.
-You don't need special tools to reply — just write your response.`;
+function loadSystemPrompt(botRoot: string): string {
+	const path = resolve(botRoot, "SYSTEM.md");
+	try {
+		return readFileSync(path, "utf-8");
+	} catch {
+		log.warn("SYSTEM.md not found at {path}, using empty system prompt", {
+			path,
+		});
+		return "";
+	}
+}
 
 function createMcpServerConfig(tools: SdkMcpToolDefinition[]) {
 	return createSdkMcpServer({
@@ -91,6 +67,7 @@ export class Executor {
 	private pluginsDir: string;
 	private coreTools: SdkMcpToolDefinition[];
 	private getLoadedPlugins: () => LoadedPlugins;
+	private selfSystemPrompt: string;
 
 	constructor(opts: {
 		config: ConfigManager;
@@ -108,6 +85,7 @@ export class Executor {
 		this.pluginsDir = opts.pluginsDir;
 		this.coreTools = opts.coreTools;
 		this.getLoadedPlugins = opts.getLoadedPlugins;
+		this.selfSystemPrompt = loadSystemPrompt(this.botRoot);
 	}
 
 	async *executeQuery(opts: QueryOpts): AsyncIterable<QueryEvent> {
@@ -163,7 +141,7 @@ export class Executor {
 						signal: opts.signal,
 					} as AbortController)
 				: undefined,
-			systemPrompt: isSelf ? SELF_SYSTEM_PROMPT : undefined,
+			systemPrompt: isSelf ? this.selfSystemPrompt : undefined,
 			permissionMode: "bypassPermissions",
 			allowDangerouslySkipPermissions: true,
 		};
