@@ -42,14 +42,25 @@ export function createPluginCommands(
 		start: async (ctx) => {
 			const plugins = getLoadedPlugins();
 			const project = sessionManager.getActiveProject(String(ctx.from?.id));
-			const projects = config.data.projects.map((p) => p.name).join(", ");
-			await ctx.reply(
-				`Welcome! I'm a self-configuring Claude bot.\n\n` +
-					`Active project: ${project}\n` +
-					`Projects: ${projects || "self"}\n` +
-					`Plugins: ${plugins.plugins.map((p) => p.name).join(", ") || "none"}\n\n` +
-					`Commands: /new /clear /cancel /ping`,
-			);
+			const projects = config.data.projects.filter((p) => p.name !== "self");
+			const pluginList =
+				plugins.plugins.map((p) => p.name).join(", ") || "none";
+
+			let msg =
+				"Hi! I'm a Claude-powered bot that configures itself through this chat.\n\n" +
+				"Just tell me what you need — I'll write plugins and apply them live.\n" +
+				"For example:\n" +
+				'• "add my project /path/to/my-app"\n' +
+				'• "react with 👀 to every message"\n' +
+				'• "set up forum topics for different projects"\n\n';
+
+			if (projects.length > 0) {
+				msg += `Projects: ${projects.map((p) => p.name).join(", ")}\n`;
+			}
+			msg += `Plugins: ${pluginList}\n`;
+			msg += "Commands: /new /clear /cancel /ping";
+
+			await ctx.reply(msg);
 		},
 
 		new: async (ctx) => {

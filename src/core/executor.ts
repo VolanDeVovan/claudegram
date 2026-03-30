@@ -38,24 +38,18 @@ function startWatchdog(userId: string, project: string): () => void {
 	return () => clearInterval(interval);
 }
 
-function buildSelfSystemPrompt(
-	config: ConfigManager,
-	plugins: LoadedPlugins,
-	botRoot: string,
-): string {
-	const activePlugins = plugins.plugins
-		.map((p) => `- ${p.name}: ${p.description ?? "(no description)"}`)
-		.join("\n");
+const SELF_SYSTEM_PROMPT = `You are a Telegram bot assistant powered by Claude.
+The current project is "self" — this is the bot's own configuration mode.
+In this mode you manage the bot itself: write plugins, change config, add projects.
+You cannot work on external codebases here — only configure the bot.
 
-	const projects = config.data.projects.map((p) => p.name).join(", ");
-
-	const selfProject = config.data.projects.find((p) => p.name === "self");
-	const projectInstructions = selfProject?.systemPrompt
-		? `\n\n== Project Instructions ==\n${selfProject.systemPrompt}`
-		: "";
-
-	return `You are a Telegram bot assistant powered by Claude.
-You can modify your own behavior by writing plugins.
+== Onboarding ==
+If the user has no projects yet (besides "self"), proactively suggest adding one:
+- Explain that "self" is only for configuring the bot, not for coding tasks
+- To work with code, the user needs to add a project: ask for the path and a short name
+- Once added, suggest setting up a way to switch between projects (e.g. /project command)
+If the user already has projects — no need to onboard unless they ask.
+Use config_get and plugin_list tools to check the current state when needed.
 
 == Plugin System ==
 Active plugins live in plugins/. You can write, edit, and delete files there.
@@ -77,33 +71,10 @@ When the user adds a project but has no project-switching mechanism:
 To understand the available API, read src/core/plugin-api.ts.
 Never modify src/. Only write to plugins/.
 
-== Active Plugins ==
-${activePlugins || "(none)"}
-
-== Current State ==
-Active project: self (${botRoot})
-Available projects: ${projects || "self"}
-Model: ${config.data.model}
-
 == Communication ==
 Your text output is automatically sent to the user's Telegram chat.
-You don't need special tools to reply — just write your response.${projectInstructions}`;
-}
+You don't need special tools to reply — just write your response.`;
 
-function buildExternalSystemPrompt(
-	config: ConfigManager,
-	projectName: string,
-): string {
-	const project = config.data.projects.find((p) => p.name === projectName);
-	const projectPrompt = project?.systemPrompt
-		? `\n\n${project.systemPrompt}`
-		: "";
-
-	return `You are a coding assistant accessed via Telegram.
-You are working on the project "${projectName}" at ${project?.path ?? "."}.
-
-Your text output is automatically sent to the user's Telegram chat.${projectPrompt}`;
-}
 
 function createMcpServerConfig(tools: SdkMcpToolDefinition[]) {
 	return createSdkMcpServer({
@@ -193,9 +164,7 @@ export class Executor {
 						signal: opts.signal,
 					} as AbortController)
 				: undefined,
-			systemPrompt: isSelf
-				? buildSelfSystemPrompt(this.config, loaded, this.botRoot)
-				: buildExternalSystemPrompt(this.config, project),
+			systemPrompt: isSelf ? SELF_SYSTEM_PROMPT : undefined,
 			permissionMode: "bypassPermissions",
 			allowDangerouslySkipPermissions: true,
 		};

@@ -30,7 +30,6 @@ const ProjectSchema = z.object({
 	path: z.string(),
 	description: z.string().optional(),
 	model: z.string().optional(),
-	systemPrompt: z.string().optional(),
 	mcpServers: z.array(McpServerSchema).optional(),
 });
 
@@ -125,7 +124,7 @@ export class ConfigManager {
 			botToken: "string — Telegram bot token from @BotFather",
 			owner: "string — Owner Telegram user ID (full access)",
 			projects:
-				"array — List of projects [{name, path, description?, model?, systemPrompt?, mcpServers?}]",
+				"array — List of projects [{name, path, description?, model?, mcpServers?}]",
 			defaultProject: "string — Default active project (default: 'self')",
 			model:
 				"string — Claude model alias (sonnet, opus, haiku) or full ID (default: 'sonnet')",
