@@ -13,15 +13,13 @@ const log = getLogger(["bot", "message-channel"]);
  *
  * Iterator behavior:
  * - Yields immediately from queue if non-empty
- * - After yielding at least one message: if queue is empty, waits one
- *   event loop tick to catch in-flight messages, then closes naturally
- * - Force-closeable via `close()` / `flush()` for /cancel
+ * - When queue is empty, blocks until a new message is pushed or channel is closed
+ * - Must be explicitly closed via `close()` / `flush()` when the agent query ends
  */
 export class MessageChannel implements AsyncIterable<SDKUserMessage> {
 	private queue: SDKUserMessage[] = [];
 	private waiter: (() => void) | null = null;
 	private _closed = false;
-	private yielded = false;
 
 	get closed(): boolean {
 		return this._closed;
@@ -79,30 +77,14 @@ export class MessageChannel implements AsyncIterable<SDKUserMessage> {
 		while (true) {
 			// Yield all currently queued messages
 			while (this.queue.length > 0) {
-				this.yielded = true;
 				const msg = this.queue.shift();
 				if (msg) yield msg;
 			}
 
-			// If force-closed, stop
+			// If closed, stop
 			if (this._closed) return;
 
-			// If we've yielded at least once and queue is empty,
-			// wait one event loop tick for in-flight messages
-			if (this.yielded) {
-				await new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-				// Check again after tick
-				if (this.queue.length > 0) continue;
-				if (this._closed) return;
-
-				// Still empty — close naturally
-				this._closed = true;
-				log.debug("Channel drained, closing naturally");
-				return;
-			}
-
-			// Haven't yielded yet — wait for the first message
+			// Wait for next push() or close()
 			await new Promise<void>((resolve) => {
 				this.waiter = resolve;
 			});

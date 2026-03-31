@@ -344,6 +344,7 @@ async function main() {
 					target,
 				);
 			} finally {
+				channel.close();
 				sessionManager.removeActiveChannel(userId, project);
 			}
 		});
