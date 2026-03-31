@@ -305,6 +305,15 @@ export class Executor {
 							// Final result text
 						}
 					}
+
+					// Close channel so streamInput() finishes and calls endInput(),
+					// allowing the CLI process to exit and the query to complete.
+					// Without this, multi-turn mode deadlocks: the channel blocks
+					// waiting for more messages, but close() is in the finally block
+					// which waits for the query to finish first.
+					if (opts.channel && !opts.channel.closed) {
+						opts.channel.close();
+					}
 				}
 			}
 		} catch (e) {
