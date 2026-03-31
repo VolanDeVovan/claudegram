@@ -191,17 +191,25 @@ export function createCoreTools(
 		},
 		{
 			name: "generation_diff",
-			description: "Show file changes between two generation snapshots.",
+			description:
+				"Show unified diff between generations or current plugins state. Omit 'to' to compare against live plugins/. Omit 'from' to use the first generation. Omit both to see full change history (first generation vs current).",
 			inputSchema: {
-				from: z.number().describe("Source generation number"),
-				to: z.number().describe("Target generation number"),
+				from: z
+					.number()
+					.optional()
+					.describe("Source generation number (omit to use first generation)"),
+				to: z
+					.number()
+					.optional()
+					.describe(
+						"Target generation number (omit to compare against current plugins/)",
+					),
 			},
 			handler: async (args: Record<string, unknown>) => {
 				try {
-					const diff = generationManager.diff(
-						Number(args.from),
-						Number(args.to),
-					);
+					const from = args.from != null ? Number(args.from) : undefined;
+					const to = args.to != null ? Number(args.to) : undefined;
+					const diff = generationManager.diff(from, to);
 					return {
 						content: [{ type: "text" as const, text: diff }],
 					};

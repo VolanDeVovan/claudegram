@@ -68,20 +68,94 @@ describe("GenerationManager", () => {
 		expect(existsSync(join(PLUGINS_DIR, "b.ts"))).toBe(false);
 	});
 
-	test("diff shows changes between generations", () => {
+	test("diff shows unified diff between two generations", () => {
 		const gm = new GenerationManager(GEN_DIR, PLUGINS_DIR);
-		writeFileSync(join(PLUGINS_DIR, "a.ts"), "// v1");
+		writeFileSync(join(PLUGINS_DIR, "a.ts"), "// v1\n");
 		gm.create("v1");
 
-		writeFileSync(join(PLUGINS_DIR, "a.ts"), "// v2");
-		writeFileSync(join(PLUGINS_DIR, "b.ts"), "// new");
+		writeFileSync(join(PLUGINS_DIR, "a.ts"), "// v2\n");
 		gm.create("v2");
 
 		const diff = gm.diff(1, 2);
-		expect(diff).toContain("a.ts");
-		expect(diff).toContain("b.ts");
-		expect(diff).toContain("modified");
-		expect(diff).toContain("added");
+		expect(diff).toContain("--- gen-1/plugins/a.ts");
+		expect(diff).toContain("+++ gen-2/plugins/a.ts");
+		expect(diff).toContain("@@");
+		expect(diff).toContain("-// v1");
+		expect(diff).toContain("+// v2");
+	});
+
+	test("diff shows content for added and removed files", () => {
+		const gm = new GenerationManager(GEN_DIR, PLUGINS_DIR);
+		writeFileSync(join(PLUGINS_DIR, "old.ts"), "// old\n");
+		gm.create("v1");
+
+		rmSync(join(PLUGINS_DIR, "old.ts"));
+		writeFileSync(join(PLUGINS_DIR, "new.ts"), "// new\n");
+		gm.create("v2");
+
+		const diff = gm.diff(1, 2);
+		expect(diff).toContain("+// new");
+		expect(diff).toContain("-// old");
+	});
+
+	test("diff returns no changes for identical generations", () => {
+		const gm = new GenerationManager(GEN_DIR, PLUGINS_DIR);
+		writeFileSync(join(PLUGINS_DIR, "a.ts"), "// same\n");
+		gm.create("v1");
+		gm.create("v2");
+
+		expect(gm.diff(1, 2)).toBe("No changes");
+	});
+
+	test("diff compares generation against current plugins/ when to is omitted", () => {
+		const gm = new GenerationManager(GEN_DIR, PLUGINS_DIR);
+		writeFileSync(join(PLUGINS_DIR, "a.ts"), "// v1\n");
+		gm.create("v1");
+
+		// Edit live plugins without creating a generation
+		writeFileSync(join(PLUGINS_DIR, "a.ts"), "// v2 live\n");
+
+		const diff = gm.diff(1);
+		expect(diff).toContain("--- gen-1/plugins/a.ts");
+		expect(diff).toContain("+++ plugins (current)/a.ts");
+		expect(diff).toContain("-// v1");
+		expect(diff).toContain("+// v2 live");
+	});
+
+	test("diff with no args compares first generation vs current", () => {
+		const gm = new GenerationManager(GEN_DIR, PLUGINS_DIR);
+		writeFileSync(join(PLUGINS_DIR, "a.ts"), "// original\n");
+		gm.create("v1");
+
+		writeFileSync(join(PLUGINS_DIR, "a.ts"), "// latest\n");
+		gm.create("v2");
+
+		// Edit live
+		writeFileSync(join(PLUGINS_DIR, "a.ts"), "// live edit\n");
+
+		const diff = gm.diff();
+		expect(diff).toContain("--- gen-1/plugins/a.ts");
+		expect(diff).toContain("plugins (current)/a.ts");
+		expect(diff).toContain("-// original");
+		expect(diff).toContain("+// live edit");
+	});
+
+	test("diff handles directory-based plugins", () => {
+		const gm = new GenerationManager(GEN_DIR, PLUGINS_DIR);
+		mkdirSync(join(PLUGINS_DIR, "myplugin"), { recursive: true });
+		writeFileSync(join(PLUGINS_DIR, "myplugin", "index.ts"), "// v1\n");
+		writeFileSync(join(PLUGINS_DIR, "myplugin", "utils.ts"), "// utils\n");
+		gm.create("v1");
+
+		writeFileSync(join(PLUGINS_DIR, "myplugin", "index.ts"), "// v2\n");
+		gm.create("v2");
+
+		const diff = gm.diff(1, 2);
+		expect(diff).toContain("myplugin/index.ts");
+		expect(diff).toContain("-// v1");
+		expect(diff).toContain("+// v2");
+		// utils.ts unchanged — should NOT appear
+		expect(diff).not.toContain("utils.ts");
 	});
 
 	test("rollback to nonexistent generation throws", () => {

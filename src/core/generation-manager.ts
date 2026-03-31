@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { getLogger } from "@logtape/logtape";
+import { createTwoFilesPatch } from "diff";
 
 const log = getLogger(["bot", "generation"]);
 
@@ -134,41 +135,67 @@ export class GenerationManager {
 		log.info("Rolled back to generation {num}", { num: generation });
 	}
 
-	diff(from: number, to: number): string {
-		const fromDir = join(this.genPath(from), "plugins");
-		const toDir = join(this.genPath(to), "plugins");
+	diff(from?: number, to?: number): string {
+		const gens = this.list();
+		const fromGen = from ?? gens[0]?.generation;
+		if (fromGen == null) {
+			return "No generations yet";
+		}
+		const fromDir = join(this.genPath(fromGen), "plugins");
+		// to omitted → compare against live plugins/
+		const toDir =
+			to != null ? join(this.genPath(to), "plugins") : this.pluginsDir;
+		const fromLabel = `gen-${fromGen}/plugins`;
+		const toLabel = to != null ? `gen-${to}/plugins` : "plugins (current)";
+
+		if (!existsSync(fromDir)) {
+			throw new Error(`Generation ${fromGen} not found`);
+		}
+		if (to != null && !existsSync(toDir)) {
+			throw new Error(`Generation ${to} not found`);
+		}
 
 		const fromFiles = this.listFiles(fromDir);
 		const toFiles = this.listFiles(toDir);
 
 		const allFiles = new Set([...fromFiles, ...toFiles]);
-		const lines: string[] = [];
+		const patches: string[] = [];
 
 		for (const file of [...allFiles].sort()) {
 			const inFrom = fromFiles.includes(file);
 			const inTo = toFiles.includes(file);
 
-			if (!inFrom) {
-				lines.push(`+ ${file} (added)`);
-			} else if (!inTo) {
-				lines.push(`- ${file} (removed)`);
-			} else {
-				const fromContent = readFileSync(join(fromDir, file), "utf-8");
-				const toContent = readFileSync(join(toDir, file), "utf-8");
-				if (fromContent !== toContent) {
-					lines.push(`~ ${file} (modified)`);
-				}
-			}
+			const fromContent = inFrom
+				? readFileSync(join(fromDir, file), "utf-8")
+				: "";
+			const toContent = inTo ? readFileSync(join(toDir, file), "utf-8") : "";
+
+			if (fromContent === toContent) continue;
+
+			const patch = createTwoFilesPatch(
+				`${fromLabel}/${file}`,
+				`${toLabel}/${file}`,
+				fromContent,
+				toContent,
+				undefined,
+				undefined,
+				{ context: 3 },
+			);
+			patches.push(patch);
 		}
 
-		return lines.length > 0 ? lines.join("\n") : "No changes";
+		return patches.length > 0 ? patches.join("\n") : "No changes";
 	}
 
 	private listFiles(dir: string): string[] {
-		if (!existsSync(dir)) return [];
-		return readdirSync(dir, { recursive: true, withFileTypes: false }).map(
-			String,
-		);
+		if (!dir || !existsSync(dir)) return [];
+		return readdirSync(dir, { recursive: true, withFileTypes: true })
+			.filter((e) => e.isFile())
+			.map((e) => {
+				const parent = e.parentPath ?? e.path;
+				const rel = parent.slice(dir.length).replace(/^\//, "");
+				return rel ? `${rel}/${e.name}` : e.name;
+			});
 	}
 
 	private rotate(): void {
