@@ -308,8 +308,6 @@ async function main() {
 	// Always routes text to Claude via executor. Plugins can modify
 	// behavior through responseRenderer, resolveTarget, approvalHandler hooks.
 	bot.on("message:text", async (ctx) => {
-		if (ctx.message.text.startsWith("/")) return;
-
 		const userId = String(ctx.from.id);
 		const project = sessionManager.getActiveProject(userId);
 
