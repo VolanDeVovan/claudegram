@@ -10,6 +10,7 @@ import { initDatabase } from "./database.ts";
 import { Executor } from "./executor.ts";
 import { GenerationManager } from "./generation-manager.ts";
 import { initLogger } from "./logger.ts";
+import { MessageChannel } from "./message-channel.ts";
 import type {
 	BotContext,
 	PluginContext,
@@ -150,7 +151,29 @@ async function main() {
 		log.info("Message from user {userId} denied", { userId });
 	});
 
-	// 7. Sequentialize per user+project
+	// 7. Message injection — inject into active channel if agent is busy
+	bot.use(async (ctx, next) => {
+		if (!ctx.message?.text || ctx.message.text.startsWith("/")) return next();
+
+		const userId = String(ctx.from?.id ?? "unknown");
+		const project = sessionManager.getActiveProject(userId);
+		const channel = sessionManager.getActiveChannel(userId, project);
+
+		if (channel && !channel.closed) {
+			const pushed = channel.push(ctx.message.text);
+			if (pushed) {
+				log.info(
+					"Message injected into active channel for {userId}:{project}",
+					{ userId, project },
+				);
+				return; // swallow update — message injected into running query
+			}
+		}
+
+		return next();
+	});
+
+	// 8. Sequentialize per user+project
 	bot.use(
 		sequentialize((ctx) => {
 			const userId = String(ctx.from?.id ?? "unknown");
@@ -159,7 +182,7 @@ async function main() {
 		}),
 	);
 
-	// 8. Swappable plugin middleware
+	// 9. Swappable plugin middleware
 	let currentMiddleware: MiddlewareFn<BotContext> = (_ctx, next) => next();
 	bot.use((ctx, next) => currentMiddleware(ctx, next));
 
@@ -305,16 +328,26 @@ async function main() {
 			}
 		}
 
+		// Create a streaming message channel for this query
+		const channel = new MessageChannel();
+		channel.push(ctx.message.text ?? "");
+		sessionManager.setActiveChannel(userId, project, channel);
+
 		await sessionManager.withSessionLock(userId, project, async (signal) => {
-			await executor.handleMessage(
-				{
-					message: ctx.message.text ?? "",
-					userId,
-					project,
-					signal,
-				},
-				target,
-			);
+			try {
+				await executor.handleMessage(
+					{
+						message: ctx.message.text ?? "",
+						userId,
+						project,
+						signal,
+						channel,
+					},
+					target,
+				);
+			} finally {
+				sessionManager.removeActiveChannel(userId, project);
+			}
 		});
 	});
 

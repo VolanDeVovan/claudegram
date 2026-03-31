@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { Bot, Context, MiddlewareFn } from "grammy";
 import type { ZodType, z } from "zod";
 import type { ConfigManager } from "./config.ts";
+import type { MessageChannel } from "./message-channel.ts";
 
 // ─── Response Target ────────────────────────────────────────────
 
@@ -44,6 +45,8 @@ export interface QueryOpts {
 	userId: string;
 	project: string;
 	signal?: AbortSignal;
+	/** Streaming prompt channel — if provided, used as AsyncIterable prompt for the SDK. */
+	channel?: MessageChannel;
 }
 
 // ─── Plugin Context ─────────────────────────────────────────────

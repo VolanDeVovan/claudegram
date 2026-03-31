@@ -4,6 +4,7 @@ import type {
 	Options,
 	SDKMessage,
 	SDKResultSuccess,
+	SDKUserMessage,
 	SdkMcpToolDefinition,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
@@ -118,7 +119,8 @@ export class Executor {
 					const result = await tool.handler(args, {
 						bot: this.bot,
 						config: this.config,
-						db: this.bot.botInfo as unknown as typeof import("../core/database.ts").db, // placeholder, actual db passed via server
+						db: this.bot
+							.botInfo as unknown as typeof import("../core/database.ts").db, // placeholder, actual db passed via server
 						query: this.createQueryFn(),
 						sessions: this.sessionManager,
 					});
@@ -243,14 +245,16 @@ export class Executor {
 			sdkOptions.resume = sessionId;
 		}
 
-		const prompt = opts.message;
+		const prompt: string | AsyncIterable<SDKUserMessage> =
+			opts.channel ?? opts.message;
 
 		log.info(
-			"Query started for project {project}, model {model}, session {session}",
+			"Query started for project {project}, model {model}, session {session}, streaming: {streaming}",
 			{
 				project,
 				model,
 				session: sessionId ? `resume ${sessionId}` : "new",
+				streaming: !!opts.channel,
 			},
 		);
 
@@ -325,7 +329,9 @@ export class Executor {
 				delete sdkOptions.resume;
 
 				try {
-					const q = sdkQuery({ prompt, options: sdkOptions });
+					// Channel may be consumed — fall back to string for retry
+					const retryPrompt = opts.message;
+					const q = sdkQuery({ prompt: retryPrompt, options: sdkOptions });
 					for await (const message of q) {
 						const msg = message as SDKMessage;
 						if (msg.type === "assistant") {

@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { getLogger } from "@logtape/logtape";
 import type { ConfigManager } from "./config.ts";
+import type { MessageChannel } from "./message-channel.ts";
 import type { SessionAPI, SessionInfo } from "./plugin-api.ts";
 
 const log = getLogger(["bot", "session"]);
@@ -10,6 +11,7 @@ export class SessionManager implements SessionAPI {
 	private config: ConfigManager;
 	private sessionLocks = new Map<string, Promise<void>>();
 	private activeControllers = new Map<string, AbortController>();
+	private activeChannels = new Map<string, MessageChannel>();
 
 	constructor(db: Database, config: ConfigManager) {
 		this.db = db;
@@ -191,8 +193,37 @@ export class SessionManager implements SessionAPI {
 		return next;
 	}
 
+	// ── Message channels (streaming input) ──
+
+	getActiveChannel(
+		userId: string,
+		project: string,
+	): MessageChannel | undefined {
+		return this.activeChannels.get(this.lockKey(userId, project));
+	}
+
+	setActiveChannel(
+		userId: string,
+		project: string,
+		channel: MessageChannel,
+	): void {
+		this.activeChannels.set(this.lockKey(userId, project), channel);
+	}
+
+	removeActiveChannel(userId: string, project: string): void {
+		this.activeChannels.delete(this.lockKey(userId, project));
+	}
+
 	cancelQuery(userId: string, project: string): boolean {
 		const key = this.lockKey(userId, project);
+
+		// Flush and close the message channel (discards pending messages)
+		const channel = this.activeChannels.get(key);
+		if (channel) {
+			channel.flush();
+			this.activeChannels.delete(key);
+		}
+
 		const controller = this.activeControllers.get(key);
 		if (controller) {
 			controller.abort();
