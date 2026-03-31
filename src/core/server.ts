@@ -1,5 +1,5 @@
 import { join, resolve } from "node:path";
-import { sequentialize } from "@grammyjs/runner";
+import { run, sequentialize } from "@grammyjs/runner";
 import { getLogger } from "@logtape/logtape";
 import { runWizard } from "@setup/wizard.ts";
 import { Bot, type MiddlewareFn } from "grammy";
@@ -356,11 +356,15 @@ async function main() {
 		owner: config.data.owner,
 	});
 
-	bot.start({
-		onStart: () => {
-			log.info("Polling started");
-		},
-	});
+	// Use runner for concurrent update processing —
+	// allows /cancel to arrive while agent is working
+	const runner = run(bot);
+	log.info("Polling started (concurrent runner)");
+
+	// Graceful shutdown
+	const stop = () => runner.stop();
+	process.once("SIGINT", stop);
+	process.once("SIGTERM", stop);
 }
 
 main().catch((e) => {
