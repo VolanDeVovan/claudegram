@@ -302,7 +302,9 @@ export class Executor {
 						turns = success.num_turns;
 						costUsd = success.total_cost_usd;
 						if (success.result && success.result !== totalText) {
-							// Final result text
+							yield { type: "text_delta", delta: success.result };
+							totalText = success.result;
+							hadTextOutput = true;
 						}
 					}
 
