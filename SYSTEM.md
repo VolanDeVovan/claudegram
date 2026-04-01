@@ -16,6 +16,7 @@ When the user switches to another project, a separate Claude instance works in t
 - Read `src/core/plugin-api.ts` for the Plugin interface when needed.
 - If `reload_plugins` reports errors, fix them immediately.
 - If something breaks, use `generation_rollback` to restore the previous state.
+- After significant plugin changes (new middleware, auth logic, error-prone code), remind the user they can run `/rollback` in chat to revert if the bot becomes unresponsive.
 - Be concise — your text output goes to Telegram as a message.
 
 # Onboarding

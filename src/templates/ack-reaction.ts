@@ -2,10 +2,11 @@
  * @plugin ack-reaction
  * @description Reacts to incoming messages with an emoji before processing.
  *   Gives the user instant feedback that their message was received.
+ *   Updates reaction to ✅ or ❌ after query completes via afterQuery hook.
  * @priority 15
  * @config plugins.ack-reaction.emoji — reaction emoji (default: "👀")
  */
-import { definePlugin } from "@core/plugin-api.ts";
+import { definePlugin, type QueryResult } from "@core/plugin-api.ts";
 import { z } from "zod";
 
 export default definePlugin({
@@ -33,4 +34,13 @@ export default definePlugin({
 			await next();
 		},
 	],
+
+	afterQuery: async (result: QueryResult, ctx) => {
+		try {
+			// biome-ignore lint/suspicious/noExplicitAny: grammy react() typing doesn't accept dynamic strings
+			await ctx.react((result.error ? "❌" : "✅") as any);
+		} catch {
+			// Reaction might fail in some chat types
+		}
+	},
 });

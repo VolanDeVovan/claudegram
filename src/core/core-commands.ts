@@ -1,5 +1,6 @@
 import type { Bot } from "grammy";
 import type { ConfigManager } from "./config.ts";
+import type { GenerationManager } from "./generation-manager.ts";
 import type { BotContext } from "./plugin-api.ts";
 import type { LoadedPlugins } from "./plugin-loader.ts";
 import type { SessionManager } from "./session-manager.ts";
@@ -11,8 +12,10 @@ export function registerCoreCommands(
 	sessionManager: SessionManager,
 	_config: ConfigManager,
 	_getLoadedPlugins: () => LoadedPlugins,
+	generationManager: GenerationManager,
+	reloadPlugins: () => Promise<{ loaded: string[]; errors: string[] }>,
 ): void {
-	// /cancel and /ping bypass sequentialize — registered BEFORE middleware
+	// /cancel, /ping, /rollback bypass sequentialize — registered BEFORE middleware
 	bot.command("cancel", async (ctx) => {
 		const userId = String(ctx.from?.id);
 		const project = sessionManager.getActiveProject(userId);
@@ -30,6 +33,27 @@ export function registerCoreCommands(
 		const min = Math.floor(uptimeSec / 60);
 		const sec = uptimeSec % 60;
 		await ctx.reply(`pong — uptime: ${min}m ${sec}s`);
+	});
+
+	bot.command("rollback", async (ctx) => {
+		const current = generationManager.getCurrent();
+		if (current <= 1) {
+			await ctx.reply("No previous generation to rollback to.");
+			return;
+		}
+		const target = current - 1;
+		try {
+			generationManager.rollback(target);
+			const result = await reloadPlugins();
+			const plugins = result.loaded.join(", ") || "none";
+			await ctx.reply(
+				`Rolled back to generation ${target}. Plugins: ${plugins}`,
+			);
+		} catch (e) {
+			await ctx.reply(
+				`Rollback failed: ${e instanceof Error ? e.message : String(e)}`,
+			);
+		}
 	});
 }
 

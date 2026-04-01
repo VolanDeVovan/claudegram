@@ -51,7 +51,6 @@ export interface LoadedPlugins {
 	plugins: Plugin[];
 	errors: Array<{ path: string; error: string }>;
 	resolveTarget: Plugin["resolveTarget"] | null;
-	responseRenderer: Plugin["responseRenderer"] | null;
 	approvalHandlers: Array<{
 		priority: number;
 		handler: NonNullable<Plugin["approvalHandler"]>;
@@ -59,6 +58,14 @@ export interface LoadedPlugins {
 	authChecks: Array<{
 		plugin: Plugin;
 		check: NonNullable<Plugin["authCheck"]>;
+	}>;
+	afterQueryHooks: Array<{
+		priority: number;
+		handler: NonNullable<Plugin["afterQuery"]>;
+	}>;
+	renderMiddlewares: Array<{
+		priority: number;
+		handler: NonNullable<Plugin["renderMiddleware"]>;
 	}>;
 	tools: Array<{ plugin: string; tool: NonNullable<Plugin["tools"]>[number] }>;
 	commands: Map<
@@ -81,9 +88,10 @@ export async function loadPlugins(
 		plugins: [],
 		errors: [],
 		resolveTarget: null,
-		responseRenderer: null,
 		approvalHandlers: [],
 		authChecks: [],
+		afterQueryHooks: [],
+		renderMiddlewares: [],
 		tools: [],
 		commands: new Map(),
 	};
@@ -122,17 +130,26 @@ export async function loadPlugins(
 				config.registerPluginSchema(plugin.name, plugin.configSchema);
 			}
 
-			// Call register() with timeout
+			// Call register() with AbortSignal — plugin can check signal.aborted
+			// to bail out of long operations. We also race against a timeout so
+			// a plugin that ignores the signal can't hang the loader.
 			if (plugin.register) {
-				await Promise.race([
-					plugin.register(pluginCtx),
-					new Promise((_, reject) =>
-						setTimeout(
-							() => reject(new Error("register() timeout (5s)")),
-							5000,
-						),
-					),
+				const signal = AbortSignal.timeout(5000);
+				const timeout = new Promise<"timeout">((resolve) => {
+					signal.addEventListener("abort", () => resolve("timeout"), {
+						once: true,
+					});
+				});
+				const winner = await Promise.race([
+					plugin.register(pluginCtx, signal),
+					timeout,
 				]);
+				if (winner === "timeout") {
+					log.warn("Plugin {plugin}: register() timed out", {
+						plugin: plugin.name,
+					});
+					continue;
+				}
 			}
 
 			// Collect exclusive hooks
@@ -147,17 +164,6 @@ export async function loadPlugins(
 				result.resolveTarget = plugin.resolveTarget;
 			}
 
-			if (plugin.responseRenderer) {
-				if (result.responseRenderer) {
-					log.warn(
-						"Plugin {plugin} skipped: responseRenderer already registered",
-						{ plugin: plugin.name },
-					);
-					continue;
-				}
-				result.responseRenderer = plugin.responseRenderer;
-			}
-
 			// Chain hooks
 			if (plugin.approvalHandler) {
 				result.approvalHandlers.push({
@@ -168,6 +174,34 @@ export async function loadPlugins(
 
 			if (plugin.authCheck) {
 				result.authChecks.push({ plugin, check: plugin.authCheck });
+			}
+
+			// Collect afterQuery hooks
+			if (plugin.afterQuery) {
+				result.afterQueryHooks.push({
+					priority: plugin.priority ?? 50,
+					handler: plugin.afterQuery,
+				});
+			}
+
+			// Collect render middlewares (+ auto-wrap deprecated responseRenderer)
+			if (plugin.responseRenderer && !plugin.renderMiddleware) {
+				log.warn(
+					"Plugin {plugin}: responseRenderer is deprecated, use renderMiddleware",
+					{ plugin: plugin.name },
+				);
+				const renderer = plugin.responseRenderer;
+				result.renderMiddlewares.push({
+					priority: plugin.priority ?? 50,
+					handler: (events, target, bot, _next) =>
+						renderer(events, target, bot),
+				});
+			}
+			if (plugin.renderMiddleware) {
+				result.renderMiddlewares.push({
+					priority: plugin.priority ?? 50,
+					handler: plugin.renderMiddleware,
+				});
 			}
 
 			// Collect tools
@@ -206,8 +240,10 @@ export async function loadPlugins(
 		}
 	}
 
-	// Sort approval handlers by priority
+	// Sort by priority
 	result.approvalHandlers.sort((a, b) => a.priority - b.priority);
+	result.afterQueryHooks.sort((a, b) => a.priority - b.priority);
+	result.renderMiddlewares.sort((a, b) => a.priority - b.priority);
 
 	log.info("Loaded {count} plugins: {names}", {
 		count: result.plugins.length,
@@ -222,21 +258,13 @@ export async function loadPlugins(
 export function buildMiddleware(loaded: LoadedPlugins): Composer<BotContext> {
 	const composer = new Composer<BotContext>();
 
-	// Register plugin middleware
+	// Register plugin middleware — errors propagate naturally.
+	// Plugins must handle their own errors (swallowing + calling next()
+	// is dangerous: auth middleware that throws = error swallowed = access granted).
 	for (const plugin of loaded.plugins) {
 		if (plugin.middleware) {
 			for (const mw of plugin.middleware) {
-				composer.use(async (ctx, next) => {
-					try {
-						await mw(ctx, next);
-					} catch (e) {
-						log.error("Plugin {plugin} middleware error: {error}", {
-							plugin: plugin.name,
-							error: e instanceof Error ? e.message : String(e),
-						});
-						await next();
-					}
-				});
+				composer.use(mw);
 			}
 		}
 	}

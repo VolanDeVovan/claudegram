@@ -18,7 +18,7 @@ export type QueryEvent =
 	| { type: "thinking_delta"; delta: string }
 	| { type: "tool_start"; tool: string; input: unknown }
 	| { type: "tool_end"; tool: string; output: string }
-	| { type: "done"; finalText: string };
+	| { type: "done"; finalText: string; turns: number };
 
 // ─── Sessions ───────────────────────────────────────────────────
 
@@ -36,6 +36,15 @@ export interface SessionAPI {
 	list(userId: string, projectName?: string): SessionInfo[];
 	activate(sessionId: string): void;
 	getActive(userId: string, projectName: string): SessionInfo | null;
+}
+
+// ─── Query Result (returned by handleMessage, passed to afterQuery) ─
+
+export interface QueryResult {
+	finalText: string;
+	turns: number;
+	project: string;
+	error?: Error;
 }
 
 // ─── Query Options ──────────────────────────────────────────────
@@ -63,6 +72,8 @@ export interface PluginContext {
 
 export interface BotContext extends Context {
 	pluginContext: PluginContext;
+	/** Set by plugins to override the text sent to Claude. Executor reads this ?? ctx.message.text. */
+	overrideText?: string;
 }
 
 // ─── Tools (MCP) ────────────────────────────────────────────────
@@ -109,6 +120,7 @@ export interface Plugin {
 	tools?: ToolDefinition[];
 
 	// hooks
+	afterQuery?: (result: QueryResult, ctx: BotContext) => void | Promise<void>;
 	authCheck?: (
 		userId: string,
 		pluginConfig: unknown,
@@ -119,15 +131,22 @@ export interface Plugin {
 		project: string,
 		ctx: BotContext,
 	) => ResponseTarget;
+	/** @deprecated Use renderMiddleware instead */
 	responseRenderer?: (
 		events: AsyncIterable<QueryEvent>,
 		target: ResponseTarget,
 		bot: Bot<BotContext>,
 	) => Promise<void>;
+	renderMiddleware?: (
+		events: AsyncIterable<QueryEvent>,
+		target: ResponseTarget,
+		bot: Bot<BotContext>,
+		next: (events: AsyncIterable<QueryEvent>) => Promise<void>,
+	) => Promise<void>;
 	approvalHandler?: (request: ApprovalRequest) => Promise<boolean>;
 
 	// lifecycle
-	register?(ctx: PluginContext): void | Promise<void>;
+	register?(ctx: PluginContext, signal: AbortSignal): void | Promise<void>;
 	dispose?(): void | Promise<void>;
 }
 

@@ -3,7 +3,7 @@
  * @description Publishes long responses (>2500 chars) to Telegraph Instant View.
  *   Uses Telegraph API createAccount (auto, no manual token needed).
  *   Account persisted in data/telegraph-account.json.
- *   Registers as responseRenderer — replaces default chunked output.
+ *   Short responses pass through to the default renderer via next().
  * @priority 50
  * @config plugins.telegraph-renderer.threshold — char limit before switching to Telegraph (default: 2500)
  */
@@ -70,8 +70,6 @@ async function createPage(
 	return data.result;
 }
 
-const EDIT_DEBOUNCE_MS = 300;
-
 export default definePlugin({
 	name: "telegraph-renderer",
 	description:
@@ -82,61 +80,37 @@ export default definePlugin({
 		threshold: z.number().default(2500),
 	}),
 
-	responseRenderer: async (
+	renderMiddleware: async (
 		events: AsyncIterable<QueryEvent>,
 		target: ResponseTarget,
 		bot: Bot<BotContext>,
+		next: (events: AsyncIterable<QueryEvent>) => Promise<void>,
 	) => {
-		let text = "";
-		let msgId: number | undefined;
-		let lastEditTime = 0;
 		const threshold = 2500;
 
+		// Collect all events — we need to know final length before deciding
+		const collected: QueryEvent[] = [];
+		let text = "";
+		for await (const event of events) {
+			collected.push(event);
+			if (event.type === "text_delta") text += event.delta;
+		}
+
+		if (text.length <= threshold) {
+			// Short response — delegate to default renderer
+			async function* replay() {
+				yield* collected;
+			}
+			await next(replay());
+			return;
+		}
+
+		// Long response — publish to Telegraph
+		const account = await getOrCreateAccount();
+		const page = await createPage(account, "Claude Response", text);
 		const sendOpts = target.messageThreadId
 			? { message_thread_id: target.messageThreadId }
 			: {};
-
-		async function editOrSend(content: string): Promise<void> {
-			try {
-				if (msgId) {
-					await bot.api.editMessageText(target.chatId, msgId, content);
-				} else {
-					const sent = await bot.api.sendMessage(
-						target.chatId,
-						content,
-						sendOpts,
-					);
-					msgId = sent.message_id;
-				}
-			} catch {
-				// Ignore edit errors
-			}
-		}
-
-		for await (const event of events) {
-			if (event.type !== "text_delta") continue;
-			text += event.delta;
-
-			if (text.length <= threshold) {
-				const now = Date.now();
-				if (now - lastEditTime >= EDIT_DEBOUNCE_MS) {
-					await editOrSend(text);
-					lastEditTime = now;
-				}
-			}
-		}
-
-		if (text.length > threshold) {
-			const account = await getOrCreateAccount();
-			const page = await createPage(account, "Claude Response", text);
-			const link = page.url;
-			if (msgId) {
-				await bot.api.editMessageText(target.chatId, msgId, link);
-			} else {
-				await bot.api.sendMessage(target.chatId, link, sendOpts);
-			}
-		} else if (text) {
-			await editOrSend(text);
-		}
+		await bot.api.sendMessage(target.chatId, page.url, sendOpts);
 	},
 });

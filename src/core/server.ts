@@ -117,8 +117,15 @@ async function main() {
 		await next();
 	});
 
-	// 5. /cancel and /ping — bypass queue
-	registerCoreCommands(bot, sessionManager, config, () => loadedPlugins);
+	// 5. /cancel, /ping, /rollback — bypass queue
+	registerCoreCommands(
+		bot,
+		sessionManager,
+		config,
+		() => loadedPlugins,
+		generationManager,
+		reloadPlugins,
+	);
 
 	// 6. Owner auth
 	bot.use(async (ctx, next) => {
@@ -192,9 +199,10 @@ async function main() {
 		plugins: [],
 		errors: [],
 		resolveTarget: null,
-		responseRenderer: null,
 		approvalHandlers: [],
 		authChecks: [],
+		afterQueryHooks: [],
+		renderMiddlewares: [],
 		tools: [],
 		commands: new Map(),
 	};
@@ -272,6 +280,10 @@ async function main() {
 		const botCommands: Array<{ command: string; description: string }> = [
 			{ command: "cancel", description: "Cancel current operation" },
 			{ command: "ping", description: "Check bot status" },
+			{
+				command: "rollback",
+				description: "Rollback to previous plugin generation",
+			},
 		];
 		for (const [name, { description }] of loadedPlugins.commands) {
 			botCommands.push({
@@ -306,7 +318,7 @@ async function main() {
 
 	// ── Text message routing (core) ──
 	// Always routes text to Claude via executor. Plugins can modify
-	// behavior through responseRenderer, resolveTarget, approvalHandler hooks.
+	// behavior through renderMiddleware, resolveTarget, approvalHandler hooks.
 	bot.on("message:text", async (ctx) => {
 		const userId = String(ctx.from.id);
 		const project = sessionManager.getActiveProject(userId);
@@ -327,15 +339,16 @@ async function main() {
 		}
 
 		// Create a streaming message channel for this query
+		const text = ctx.overrideText ?? ctx.message.text ?? "";
 		const channel = new MessageChannel();
-		channel.push(ctx.message.text ?? "");
+		channel.push(text);
 		sessionManager.setActiveChannel(userId, project, channel);
 
 		await sessionManager.withSessionLock(userId, project, async (signal) => {
 			try {
-				await executor.handleMessage(
+				const result = await executor.handleMessage(
 					{
-						message: ctx.message.text ?? "",
+						message: text,
 						userId,
 						project,
 						signal,
@@ -343,6 +356,24 @@ async function main() {
 					},
 					target,
 				);
+
+				if (result.error) {
+					log.error("Query error: {error}", {
+						error: result.error.message,
+					});
+					await ctx.reply(`Error: ${result.error.message}`).catch(() => {});
+				}
+
+				// Call afterQuery hooks in priority order. Errors logged, never break pipeline.
+				for (const { handler } of loadedPlugins.afterQueryHooks) {
+					try {
+						await handler(result, ctx);
+					} catch (e) {
+						log.error("afterQuery hook error: {error}", {
+							error: e instanceof Error ? e.message : String(e),
+						});
+					}
+				}
 			} finally {
 				channel.close();
 				sessionManager.removeActiveChannel(userId, project);

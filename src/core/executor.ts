@@ -18,6 +18,7 @@ import type {
 	BotContext,
 	QueryEvent,
 	QueryOpts,
+	QueryResult,
 	ResponseTarget,
 } from "./plugin-api.ts";
 import type { LoadedPlugins } from "./plugin-loader.ts";
@@ -321,7 +322,7 @@ export class Executor {
 		} catch (e) {
 			if (opts.signal?.aborted) {
 				log.info("Query aborted for project {project}", { project });
-				yield { type: "done", finalText: "" };
+				yield { type: "done", finalText: "", turns: 0 };
 				return;
 			}
 
@@ -412,14 +413,17 @@ export class Executor {
 			duration,
 		});
 
-		yield { type: "done", finalText: totalText };
+		yield { type: "done", finalText: totalText, turns };
 	}
 
 	createQueryFn(): (opts: QueryOpts) => AsyncIterable<QueryEvent> {
 		return (opts: QueryOpts) => this.executeQuery(opts);
 	}
 
-	async handleMessage(opts: QueryOpts, target: ResponseTarget): Promise<void> {
+	async handleMessage(
+		opts: QueryOpts,
+		target: ResponseTarget,
+	): Promise<QueryResult> {
 		const loaded = this.getLoadedPlugins();
 
 		// Typing indicator heartbeat
@@ -432,16 +436,48 @@ export class Executor {
 				.catch(() => {});
 		}, 4000);
 
-		try {
-			const events = this.executeQuery(opts);
+		const result: QueryResult = {
+			finalText: "",
+			turns: 0,
+			project: opts.project,
+		};
 
-			if (loaded.responseRenderer) {
-				await loaded.responseRenderer(events, target, this.bot);
-			} else {
-				await defaultRenderer(events, target, this.bot);
+		try {
+			// Wrap events to capture QueryResult from the done event
+			const rawEvents = this.executeQuery(opts);
+			async function* captureResult(
+				source: AsyncIterable<QueryEvent>,
+			): AsyncIterable<QueryEvent> {
+				for await (const event of source) {
+					if (event.type === "done") {
+						result.finalText = event.finalText;
+						result.turns = event.turns;
+					}
+					yield event;
+				}
 			}
+			const events = captureResult(rawEvents);
+
+			// Build render chain: plugins sorted by priority, defaultRenderer last
+			type RenderFn = (
+				events: AsyncIterable<QueryEvent>,
+				target: ResponseTarget,
+				bot: Bot<BotContext>,
+			) => Promise<void>;
+
+			let render: RenderFn = defaultRenderer;
+			for (const mw of loaded.renderMiddlewares.toReversed()) {
+				const next = render;
+				render = (events, target, bot) =>
+					mw.handler(events, target, bot, (e) => next(e, target, bot));
+			}
+			await render(events, target, this.bot);
+		} catch (e) {
+			result.error = e instanceof Error ? e : new Error(String(e));
 		} finally {
 			clearInterval(typingInterval);
 		}
+
+		return result;
 	}
 }
