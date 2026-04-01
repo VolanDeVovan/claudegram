@@ -150,7 +150,7 @@ export class Executor {
 
 		// Add MCP servers
 		const mcpServers: Record<string, unknown> = {};
-		if (isSelf && allTools.length > 0) {
+		if (allTools.length > 0) {
 			mcpServers["claudegram-core"] = createMcpServerConfig(allTools);
 		}
 
