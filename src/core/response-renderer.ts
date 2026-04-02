@@ -21,6 +21,7 @@ export async function defaultRenderer(
 	let lastEditTime = 0;
 	let lastSentText = "";
 	let pendingEdit: ReturnType<typeof setTimeout> | null = null;
+	let rendering: Promise<void> | null = null;
 
 	const sendOpts = target.messageThreadId
 		? { message_thread_id: target.messageThreadId }
@@ -76,7 +77,7 @@ export async function defaultRenderer(
 		}
 	}
 
-	async function render(): Promise<void> {
+	async function doRender(): Promise<void> {
 		if (!text || text === lastSentText) return;
 
 		const html = markdownToTelegramHtml(text);
@@ -90,6 +91,11 @@ export async function defaultRenderer(
 				await editHtml(sentMessages[i] as number, chunk);
 			} else {
 				// Send new message
+				log.debug("Sending chunk {i}/{total} ({len} chars)", {
+					i: i + 1,
+					total: chunks.length,
+					len: chunk.length,
+				});
 				const msgId = await sendHtml(chunk);
 				sentMessages.push(msgId);
 			}
@@ -97,6 +103,17 @@ export async function defaultRenderer(
 
 		lastSentText = text;
 		lastEditTime = Date.now();
+	}
+
+	async function render(): Promise<void> {
+		// Serialize renders to prevent concurrent sends of the same chunk
+		if (rendering) await rendering;
+		rendering = doRender();
+		try {
+			await rendering;
+		} finally {
+			rendering = null;
+		}
 	}
 
 	function scheduleEdit(): void {
