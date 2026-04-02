@@ -47,11 +47,293 @@ async function getOrCreateAccount(): Promise<TelegraphAccount> {
 	return data.result;
 }
 
-function textToNodes(text: string): Array<{ tag: string; children: string[] }> {
-	return text
-		.split(/\n\n+/)
-		.filter(Boolean)
-		.map((para) => ({ tag: "p", children: [para] }));
+type TNode =
+	| string
+	| { tag: string; attrs?: Record<string, string>; children?: TNode[] };
+
+/** Parse inline markdown: bold+italic, bold, italic, strikethrough, code, links */
+function parseInline(text: string): TNode[] {
+	const nodes: TNode[] = [];
+	let remaining = text;
+
+	const patterns: Array<{
+		regex: RegExp;
+		handler: (m: RegExpMatchArray) => TNode;
+	}> = [
+		// Links: [text](url)
+		{
+			regex: /\[([^\]]+)\]\(([^)]+)\)/,
+			handler: (m) => ({ tag: "a", attrs: { href: m[2] }, children: [m[1]] }),
+		},
+		// Bold + Italic: ***text***
+		{
+			regex: /\*\*\*(.+?)\*\*\*/,
+			handler: (m) => ({
+				tag: "strong",
+				children: [{ tag: "em", children: [m[1]] }],
+			}),
+		},
+		// Bold: **text** or __text__
+		{
+			regex: /\*\*(.+?)\*\*/,
+			handler: (m) => ({ tag: "strong", children: [m[1]] }),
+		},
+		{
+			regex: /__(.+?)__/,
+			handler: (m) => ({ tag: "strong", children: [m[1]] }),
+		},
+		// Italic: *text* or _text_ (not inside words for _)
+		{
+			regex: /\*(.+?)\*/,
+			handler: (m) => ({ tag: "em", children: [m[1]] }),
+		},
+		{
+			regex: /(?<!\w)_(.+?)_(?!\w)/,
+			handler: (m) => ({ tag: "em", children: [m[1]] }),
+		},
+		// Strikethrough: ~~text~~
+		{
+			regex: /~~(.+?)~~/,
+			handler: (m) => ({ tag: "s", children: [m[1]] }),
+		},
+		// Inline code: `code`
+		{
+			regex: /`([^`]+)`/,
+			handler: (m) => ({ tag: "code", children: [m[1]] }),
+		},
+	];
+
+	while (remaining.length > 0) {
+		let earliest: {
+			index: number;
+			length: number;
+			node: TNode;
+		} | null = null;
+
+		for (const pattern of patterns) {
+			const match = remaining.match(pattern.regex);
+			if (match?.index !== undefined) {
+				if (!earliest || match.index < earliest.index) {
+					earliest = {
+						index: match.index,
+						length: match[0].length,
+						node: pattern.handler(match),
+					};
+				}
+			}
+		}
+
+		if (earliest) {
+			if (earliest.index > 0) {
+				nodes.push(remaining.slice(0, earliest.index));
+			}
+			nodes.push(earliest.node);
+			remaining = remaining.slice(earliest.index + earliest.length);
+		} else {
+			nodes.push(remaining);
+			break;
+		}
+	}
+
+	return nodes;
+}
+
+/** Parse markdown text into Telegraph-compatible node tree */
+function textToNodes(text: string): TNode[] {
+	const nodes: TNode[] = [];
+	const lines = text.split("\n");
+	let inCodeBlock = false;
+	let codeBlockContent = "";
+	let inList: "ul" | "ol" | null = null;
+	let listItems: TNode[] = [];
+	let pendingParagraphLines: string[] = [];
+	let tableHeaders: string[] = [];
+
+	const flushParagraph = () => {
+		if (pendingParagraphLines.length === 0) return;
+		const children: TNode[] = [];
+		for (let j = 0; j < pendingParagraphLines.length; j++) {
+			if (j > 0) children.push({ tag: "br" });
+			children.push(...parseInline(pendingParagraphLines[j]));
+		}
+		nodes.push({ tag: "p", children });
+		pendingParagraphLines = [];
+	};
+
+	const flushList = () => {
+		if (inList && listItems.length > 0) {
+			nodes.push({ tag: inList, children: listItems });
+			listItems = [];
+			inList = null;
+		}
+	};
+
+	const flushAll = () => {
+		flushParagraph();
+		flushList();
+	};
+
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+
+		// Code block handling
+		if (line.startsWith("```")) {
+			flushAll();
+			if (inCodeBlock) {
+				nodes.push({
+					tag: "pre",
+					children: [codeBlockContent.trimEnd()],
+				});
+				inCodeBlock = false;
+				codeBlockContent = "";
+			} else {
+				inCodeBlock = true;
+			}
+			continue;
+		}
+
+		if (inCodeBlock) {
+			codeBlockContent += `${line}\n`;
+			continue;
+		}
+
+		// Empty line — paragraph break
+		if (line.trim() === "") {
+			flushAll();
+			continue;
+		}
+
+		// Horizontal rule
+		if (/^[-*_]{3,}\s*$/.test(line)) {
+			flushAll();
+			nodes.push({ tag: "hr" });
+			continue;
+		}
+
+		// Headers
+		if (line.startsWith("#### ")) {
+			flushAll();
+			nodes.push({ tag: "h4", children: parseInline(line.slice(5)) });
+			continue;
+		}
+		if (line.startsWith("### ")) {
+			flushAll();
+			nodes.push({ tag: "h4", children: parseInline(line.slice(4)) });
+			continue;
+		}
+		if (line.startsWith("## ")) {
+			flushAll();
+			nodes.push({ tag: "h3", children: parseInline(line.slice(3)) });
+			continue;
+		}
+		if (line.startsWith("# ")) {
+			flushAll();
+			nodes.push({ tag: "h3", children: parseInline(line.slice(2)) });
+			continue;
+		}
+
+		// Unordered list items
+		if (/^\s*[-*+]\s+/.test(line)) {
+			flushParagraph();
+			if (inList !== "ul") {
+				flushList();
+				inList = "ul";
+			}
+			const content = line.replace(/^\s*[-*+]\s+/, "");
+			listItems.push({ tag: "li", children: parseInline(content) });
+			continue;
+		}
+
+		// Ordered list items
+		const orderedMatch = line.match(/^\s*(\d+)[.)]\s+(.*)$/);
+		if (orderedMatch) {
+			flushParagraph();
+			if (inList !== "ol") {
+				flushList();
+				inList = "ol";
+			}
+			listItems.push({ tag: "li", children: parseInline(orderedMatch[2]) });
+			continue;
+		}
+
+		// Blockquote
+		if (line.startsWith("> ")) {
+			flushAll();
+			nodes.push({
+				tag: "blockquote",
+				children: parseInline(line.slice(2)),
+			});
+			continue;
+		}
+
+		// Table handling — header as bold, data rows with labels
+		if (line.includes("|") && line.trim().startsWith("|")) {
+			flushAll();
+			const cells = line
+				.split("|")
+				.filter((c) => c.trim())
+				.map((c) => c.trim());
+
+			// Skip separator rows
+			if (cells.length > 0 && cells.every((c) => /^[-:]+$/.test(c))) {
+				continue;
+			}
+
+			// Detect header row: next line is a separator
+			const nextLine = i + 1 < lines.length ? lines[i + 1] : "";
+			const nextCells = nextLine
+				.split("|")
+				.filter((c) => c.trim())
+				.map((c) => c.trim());
+			const isHeader =
+				nextCells.length > 0 && nextCells.every((c) => /^[-:]+$/.test(c));
+
+			if (isHeader && cells.length > 0) {
+				tableHeaders = cells;
+				nodes.push({
+					tag: "p",
+					children: [{ tag: "strong", children: [cells.join("  ·  ")] }],
+				});
+				continue;
+			}
+
+			// Data row — use stored headers for labeled output
+			if (tableHeaders.length > 0 && cells.length > 0) {
+				const parts: TNode[] = [];
+				for (let ci = 0; ci < cells.length; ci++) {
+					if (ci > 0) parts.push("  |  ");
+					if (tableHeaders[ci]) {
+						parts.push({
+							tag: "strong",
+							children: [`${tableHeaders[ci]}: `],
+						});
+					}
+					parts.push(cells[ci]);
+				}
+				nodes.push({ tag: "p", children: parts });
+			} else if (cells.length > 0) {
+				nodes.push({ tag: "p", children: [cells.join("  |  ")] });
+			}
+			continue;
+		}
+
+		// Regular text line — accumulate into pending paragraph
+		flushList();
+		pendingParagraphLines.push(line);
+	}
+
+	// Flush remaining content
+	flushAll();
+
+	// Close unclosed code block
+	if (inCodeBlock && codeBlockContent) {
+		nodes.push({
+			tag: "pre",
+			children: [codeBlockContent.trimEnd()],
+		});
+	}
+
+	return nodes;
 }
 
 async function createPage(
