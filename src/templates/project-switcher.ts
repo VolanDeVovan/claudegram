@@ -4,6 +4,8 @@
  *   Shows buttons for each project, highlights the active one.
  *   Works in any chat type but designed primarily for private chats.
  * @priority 30
+ * @postInstall Added command `/project` — shows inline keyboard to switch between projects.
+ *   If the user has only "self" project, suggest adding a project first.
  */
 import { definePlugin } from "@core/plugin-api.ts";
 import type { SessionManager } from "@core/session-manager.ts";

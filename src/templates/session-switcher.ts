@@ -5,6 +5,8 @@
  *   /continue (resume latest inactive).
  *   Uses ctx.pluginContext.sessions API from core.
  * @priority 50
+ * @postInstall Added commands: `/sessions` (list all), `/resume` (pick session),
+ *   `/continue` (resume latest inactive). Works immediately, no configuration needed.
  */
 import { definePlugin } from "@core/plugin-api.ts";
 import { InlineKeyboard } from "grammy";

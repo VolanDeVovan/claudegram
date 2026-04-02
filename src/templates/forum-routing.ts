@@ -6,6 +6,11 @@
  *   Only activates in supergroups with forum topics enabled.
  * @priority 20
  * @config plugins.forum-routing.threadMap — Record<threadId, projectName>
+ * @prerequisites The bot must be added to a supergroup with forum topics enabled
+ *   (group settings → Topics → ON). At least two projects must be configured.
+ * @postInstall Need to configure threadMap — mapping of topic IDs to project names.
+ *   Ask the user which forum topics to bind to which projects.
+ *   Topic IDs can be obtained by forwarding a message from a topic to @JsonDumpBot.
  */
 import { definePlugin } from "@core/plugin-api.ts";
 import type { SessionManager } from "@core/session-manager.ts";

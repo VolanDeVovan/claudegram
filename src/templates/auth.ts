@@ -5,6 +5,8 @@
  *   Without this plugin, only the owner can interact with the bot.
  * @priority 10
  * @config plugins.auth.allowedUsers — array of Telegram user IDs
+ * @postInstall Added tools: `user_add` and `user_remove` for managing the whitelist.
+ *   Ask the user for Telegram user IDs to add. Users can find their ID via @userinfobot.
  */
 import { definePlugin, defineTool } from "@core/plugin-api.ts";
 import { z } from "zod";

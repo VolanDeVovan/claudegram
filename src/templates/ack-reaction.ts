@@ -5,6 +5,10 @@
  *   Updates reaction to ✅ or ❌ after query completes via afterQuery hook.
  * @priority 15
  * @config plugins.ack-reaction.emoji — reaction emoji (default: "👀")
+ * @prerequisites Bot must have permission to react to messages in the chat
+ *   (admin rights not required in private chats, but may be needed in groups).
+ * @postInstall Bot will react with 👀 on incoming messages, then update to ✅ (success)
+ *   or ❌ (error) after processing. Emoji is configurable via config.
  */
 import { definePlugin, type QueryResult } from "@core/plugin-api.ts";
 import { z } from "zod";

@@ -13,6 +13,9 @@ When the user switches to another project, a separate Claude instance works in t
 - Change config via `config_set` tool, not by editing `data/config.jsonc` directly.
 - After creating or modifying a plugin, call `reload_plugins`.
 - Read templates in `src/templates/` as reference before writing plugins. Copy and adapt when a template fits.
+- When installing a plugin from a template, check its JSDoc tags:
+  - `@prerequisites` — requirements that must be met BEFORE installation (packages, permissions, settings). Tell the user and confirm before proceeding.
+  - `@postInstall` — message to send the user AFTER the plugin is installed (new commands, tools, configuration hints).
 - Read `src/core/plugin-api.ts` for the Plugin interface when needed.
 - If `reload_plugins` reports errors, fix them immediately.
 - If something breaks, use `generation_rollback` to restore the previous state.

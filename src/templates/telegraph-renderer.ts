@@ -6,6 +6,10 @@
  *   Short responses pass through to the default renderer via next().
  * @priority 50
  * @config plugins.telegraph-renderer.threshold — char limit before switching to Telegraph (default: 2500)
+ * @prerequisites Bot must have internet access to reach api.telegra.ph.
+ * @postInstall Long responses (>2500 chars) will now be published as Telegraph pages
+ *   with Instant View. Threshold is configurable. Telegraph account is created
+ *   automatically on first use, no API keys needed.
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
