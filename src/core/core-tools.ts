@@ -4,14 +4,19 @@ import type { ConfigManager } from "./config.ts";
 import type { GenerationManager } from "./generation-manager.ts";
 import type { LoadedPlugins } from "./plugin-loader.ts";
 
+export type CoreToolDef = SdkMcpToolDefinition & {
+	scope: "self" | "all" | string[];
+};
+
 export function createCoreTools(
 	config: ConfigManager,
 	generationManager: GenerationManager,
 	getLoadedPlugins: () => LoadedPlugins,
 	reloadFn: () => Promise<{ loaded: string[]; errors: string[] }>,
-): SdkMcpToolDefinition[] {
-	return [
+): CoreToolDef[] {
+	const tools: CoreToolDef[] = [
 		{
+			scope: "self",
 			name: "config_get",
 			description:
 				"Get bot configuration. Without key: returns full config with field descriptions. With key: returns specific value (dot-path, e.g. 'plugins.auth.allowedUsers').",
@@ -51,6 +56,7 @@ export function createCoreTools(
 			},
 		},
 		{
+			scope: "self",
 			name: "config_set",
 			description:
 				"Set a bot configuration value. Key is a dot-path (e.g. 'model', 'plugins.auth.allowedUsers'). Validates via Zod schema. Preserves JSONC comments.",
@@ -86,6 +92,7 @@ export function createCoreTools(
 			},
 		},
 		{
+			scope: "self",
 			name: "plugin_list",
 			description:
 				"List active plugins loaded from plugins/ and available templates from src/templates/.",
@@ -124,6 +131,7 @@ export function createCoreTools(
 			},
 		},
 		{
+			scope: "self",
 			name: "reload_plugins",
 			description:
 				"Hot-reload all plugins from plugins/. Creates a generation snapshot before reload. Returns list of loaded plugins and errors.",
@@ -141,6 +149,7 @@ export function createCoreTools(
 			},
 		},
 		{
+			scope: "self",
 			name: "generation_list",
 			description: "List all plugin generation snapshots with descriptions.",
 			inputSchema: {},
@@ -158,6 +167,7 @@ export function createCoreTools(
 			},
 		},
 		{
+			scope: "self",
 			name: "generation_rollback",
 			description: "Rollback plugins to a specific generation snapshot.",
 			inputSchema: {
@@ -190,6 +200,7 @@ export function createCoreTools(
 			},
 		},
 		{
+			scope: "self",
 			name: "generation_diff",
 			description:
 				"Show unified diff between generations or current plugins state. Omit 'to' to compare against live plugins/. Omit 'from' to use the first generation. Omit both to see full change history (first generation vs current).",
@@ -226,5 +237,7 @@ export function createCoreTools(
 				}
 			},
 		},
-	] as SdkMcpToolDefinition[];
+	];
+
+	return tools;
 }

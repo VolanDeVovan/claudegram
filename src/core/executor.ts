@@ -15,6 +15,7 @@ import {
 import { getLogger } from "@logtape/logtape";
 import type { Bot } from "grammy";
 import type { ConfigManager } from "./config.ts";
+import type { CoreToolDef } from "./core-tools.ts";
 import type {
 	BotContext,
 	QueryEvent,
@@ -28,6 +29,18 @@ import { defaultRenderer } from "./response-renderer.ts";
 import type { SessionManager } from "./session-manager.ts";
 
 const log = getLogger(["bot", "executor"]);
+
+function isScopeAllowed(
+	scope: "self" | "all" | string[],
+	project: string,
+	isSelf: boolean,
+): boolean {
+	return (
+		scope === "all" ||
+		(scope === "self" && isSelf) ||
+		(Array.isArray(scope) && scope.includes(project))
+	);
+}
 
 const WATCHDOG_WARN_SEC = 60;
 const WATCHDOG_LOG_INTERVAL_SEC = 30;
@@ -70,7 +83,7 @@ export class Executor {
 	private db: Database;
 	private botRoot: string;
 	private pluginsDir: string;
-	private coreTools: SdkMcpToolDefinition[];
+	private coreTools: CoreToolDef[];
 	private getLoadedPlugins: () => LoadedPlugins;
 	private selfSystemPrompt: string;
 
@@ -81,7 +94,7 @@ export class Executor {
 		db: Database;
 		botRoot: string;
 		pluginsDir: string;
-		coreTools: SdkMcpToolDefinition[];
+		coreTools: CoreToolDef[];
 		getLoadedPlugins: () => LoadedPlugins;
 	}) {
 		this.config = opts.config;
@@ -123,14 +136,16 @@ export class Executor {
 		};
 
 		// Build MCP server for tools (core + plugin)
-		const allTools = [...this.coreTools];
+		const allTools: SdkMcpToolDefinition[] = [];
+		for (const tool of this.coreTools) {
+			const scope = this.config.data.coreTools[tool.name] ?? tool.scope;
+			if (!isScopeAllowed(scope, project, isSelf)) continue;
+			const { scope: _scope, ...sdkTool } = tool;
+			allTools.push(sdkTool);
+		}
 		for (const { tool } of loaded.tools) {
 			const scope = tool.scope ?? "self";
-			const allowed =
-				scope === "all" ||
-				(scope === "self" && isSelf) ||
-				(Array.isArray(scope) && scope.includes(project));
-			if (!allowed) continue;
+			if (!isScopeAllowed(scope, project, isSelf)) continue;
 
 			allTools.push({
 				name: tool.name,

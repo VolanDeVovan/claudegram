@@ -42,6 +42,12 @@ export const BaseConfigSchema = z.object({
 	maxTurns: z.number().default(200),
 	sessionTimeoutHours: z.number().default(24),
 	plugins: z.record(z.string(), z.unknown()).default({}),
+	coreTools: z
+		.record(
+			z.string(),
+			z.union([z.literal("self"), z.literal("all"), z.array(z.string())]),
+		)
+		.default({}),
 });
 
 export type BotConfig = z.infer<typeof BaseConfigSchema>;
@@ -79,6 +85,16 @@ export class ConfigManager {
 		return current as T;
 	}
 
+	private static readonly CORE_TOOL_NAMES = new Set([
+		"config_get",
+		"config_set",
+		"plugin_list",
+		"reload_plugins",
+		"generation_list",
+		"generation_rollback",
+		"generation_diff",
+	]);
+
 	set(key: string, value: unknown): void {
 		const path = key.split(".");
 
@@ -88,6 +104,36 @@ export class ConfigManager {
 			const schema = this.pluginSchemas.get(pluginName);
 			if (schema && path.length === 2) {
 				schema.parse(value);
+			}
+		}
+
+		// Validate coreTools entries
+		if (path[0] === "coreTools" && path.length === 2) {
+			const toolName = path[1] as string;
+			if (!ConfigManager.CORE_TOOL_NAMES.has(toolName)) {
+				throw new Error(
+					`Unknown core tool '${toolName}'. Valid tools: ${[...ConfigManager.CORE_TOOL_NAMES].join(", ")}`,
+				);
+			}
+			this.validateCoreToolScope(toolName, value);
+		}
+
+		// Validate full coreTools object
+		if (
+			path[0] === "coreTools" &&
+			path.length === 1 &&
+			typeof value === "object" &&
+			value !== null
+		) {
+			for (const [toolName, scope] of Object.entries(
+				value as Record<string, unknown>,
+			)) {
+				if (!ConfigManager.CORE_TOOL_NAMES.has(toolName)) {
+					throw new Error(
+						`Unknown core tool '${toolName}'. Valid tools: ${[...ConfigManager.CORE_TOOL_NAMES].join(", ")}`,
+					);
+				}
+				this.validateCoreToolScope(toolName, scope);
 			}
 		}
 
@@ -104,6 +150,28 @@ export class ConfigManager {
 			key,
 			value: JSON.stringify(value),
 		});
+	}
+
+	private validateCoreToolScope(toolName: string, scope: unknown): void {
+		if (scope === "self" || scope === "all") return;
+		if (!Array.isArray(scope)) {
+			throw new Error(
+				`Invalid scope for core tool '${toolName}': must be "self", "all", or an array of project names`,
+			);
+		}
+		const projectNames = new Set(this.parsed.projects.map((p) => p.name));
+		for (const name of scope) {
+			if (typeof name !== "string") {
+				throw new Error(
+					`Invalid scope for core tool '${toolName}': array must contain strings`,
+				);
+			}
+			if (!projectNames.has(name)) {
+				throw new Error(
+					`Unknown project '${name}' in scope for core tool '${toolName}'. Known projects: ${[...projectNames].join(", ") || "(none)"}`,
+				);
+			}
+		}
 	}
 
 	reload(): void {
@@ -131,6 +199,8 @@ export class ConfigManager {
 			maxTurns: "number — Max conversation turns per query (default: 200)",
 			sessionTimeoutHours: "number — Session timeout in hours (default: 24)",
 			plugins: "object — Plugin-specific configuration (keyed by plugin name)",
+			coreTools:
+				'object — Override visibility scope for built-in tools. Keys: tool name (config_get, config_set, plugin_list, reload_plugins, generation_list, generation_rollback, generation_diff). Values: "self" (only in self project), "all" (all projects), or ["proj1","proj2"] (specific projects). Default scope for all core tools is "self". Example: {"plugin_list": "all"} makes plugin_list available in every project.',
 		};
 
 		for (const [name, _schema] of this.pluginSchemas) {
