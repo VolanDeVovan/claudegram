@@ -67,6 +67,11 @@ export default definePlugin({
 				return;
 			}
 
+			if (target.isActive) {
+				await ctx.answerCallbackQuery();
+				return;
+			}
+
 			sessions.activate(target.id);
 
 			const updated = sessions.list(userId);
