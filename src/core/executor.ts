@@ -307,6 +307,18 @@ export class Executor {
 							totalText = success.result;
 							hadTextOutput = true;
 						}
+					} else {
+						const reason = msg.subtype ?? "unknown";
+						log.warn(
+							"Query ended with non-success result: {reason}",
+							{ reason, project },
+						);
+						const sep = hadTextOutput ? "\n\n" : "";
+						yield {
+							type: "text_delta",
+							delta: `${sep}⚠️ Agent stopped with error: ${reason}`,
+						};
+						hadTextOutput = true;
 					}
 
 					// Close channel so streamInput() finishes and calls endInput(),
