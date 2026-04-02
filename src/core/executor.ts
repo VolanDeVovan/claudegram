@@ -1,3 +1,4 @@
+import type { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type {
@@ -20,6 +21,7 @@ import type {
 	QueryOpts,
 	QueryResult,
 	ResponseTarget,
+	ToolContext,
 } from "./plugin-api.ts";
 import type { LoadedPlugins } from "./plugin-loader.ts";
 import { defaultRenderer } from "./response-renderer.ts";
@@ -65,6 +67,7 @@ export class Executor {
 	private config: ConfigManager;
 	private sessionManager: SessionManager;
 	private bot: Bot<BotContext>;
+	private db: Database;
 	private botRoot: string;
 	private pluginsDir: string;
 	private coreTools: SdkMcpToolDefinition[];
@@ -75,6 +78,7 @@ export class Executor {
 		config: ConfigManager;
 		sessionManager: SessionManager;
 		bot: Bot<BotContext>;
+		db: Database;
 		botRoot: string;
 		pluginsDir: string;
 		coreTools: SdkMcpToolDefinition[];
@@ -83,6 +87,7 @@ export class Executor {
 		this.config = opts.config;
 		this.sessionManager = opts.sessionManager;
 		this.bot = opts.bot;
+		this.db = opts.db;
 		this.botRoot = opts.botRoot;
 		this.pluginsDir = opts.pluginsDir;
 		this.coreTools = opts.coreTools;
@@ -90,7 +95,10 @@ export class Executor {
 		this.selfSystemPrompt = loadSystemPrompt(this.botRoot);
 	}
 
-	async *executeQuery(opts: QueryOpts): AsyncIterable<QueryEvent> {
+	async *executeQuery(
+		opts: QueryOpts,
+		target?: ResponseTarget,
+	): AsyncIterable<QueryEvent> {
 		const project = opts.project;
 		const isSelf = project === "self";
 		const projectConfig = this.config.data.projects.find(
@@ -99,6 +107,20 @@ export class Executor {
 		const cwd = isSelf ? this.botRoot : (projectConfig?.path ?? this.botRoot);
 		const model = projectConfig?.model ?? this.config.data.model;
 		const loaded = this.getLoadedPlugins();
+
+		// Build ToolContext once per query
+		const toolCtx: ToolContext = {
+			bot: this.bot,
+			config: this.config,
+			db: this.db,
+			query: this.createQueryFn(),
+			sessions: this.sessionManager,
+			userId: opts.userId,
+			project,
+			cwd,
+			chatId: target?.chatId,
+			messageThreadId: target?.messageThreadId,
+		};
 
 		// Build MCP server for tools (core + plugin)
 		const allTools = [...this.coreTools];
@@ -113,18 +135,11 @@ export class Executor {
 			allTools.push({
 				name: tool.name,
 				description: tool.description,
-				inputSchema: {},
+				inputSchema: tool.schema,
 				handler: async (args) => {
 					log.info("Tool call: {tool}", { tool: tool.name, args });
 					const start = Date.now();
-					const result = await tool.handler(args, {
-						bot: this.bot,
-						config: this.config,
-						db: this.bot
-							.botInfo as unknown as typeof import("../core/database.ts").db, // placeholder, actual db passed via server
-						query: this.createQueryFn(),
-						sessions: this.sessionManager,
-					});
+					const result = await tool.handler(args, toolCtx);
 					const ms = Date.now() - start;
 					log.info("Tool done: {tool} ({ms}ms)", { tool: tool.name, ms });
 					return { content: [{ type: "text" as const, text: result }] };
@@ -309,10 +324,10 @@ export class Executor {
 						}
 					} else {
 						const reason = msg.subtype ?? "unknown";
-						log.warn(
-							"Query ended with non-success result: {reason}",
-							{ reason, project },
-						);
+						log.warn("Query ended with non-success result: {reason}", {
+							reason,
+							project,
+						});
 						const sep = hadTextOutput ? "\n\n" : "";
 						yield {
 							type: "text_delta",
@@ -456,7 +471,7 @@ export class Executor {
 
 		try {
 			// Wrap events to capture QueryResult from the done event
-			const rawEvents = this.executeQuery(opts);
+			const rawEvents = this.executeQuery(opts, target);
 			async function* captureResult(
 				source: AsyncIterable<QueryEvent>,
 			): AsyncIterable<QueryEvent> {

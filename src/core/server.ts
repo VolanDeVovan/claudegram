@@ -189,6 +189,7 @@ async function main() {
 		config,
 		sessionManager,
 		bot,
+		db,
 		botRoot: BOT_ROOT,
 		pluginsDir: PLUGINS_DIR,
 		coreTools,

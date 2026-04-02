@@ -36,6 +36,7 @@ export interface SessionAPI {
 	list(userId: string, projectName?: string): SessionInfo[];
 	activate(sessionId: string): void;
 	getActive(userId: string, projectName: string): SessionInfo | null;
+	getActiveProject(userId: string): string;
 }
 
 // ─── Query Result (returned by handleMessage, passed to afterQuery) ─
@@ -68,6 +69,15 @@ export interface PluginContext {
 	sessions: SessionAPI;
 }
 
+/** Сервисы + per-request данные. Получаешь в tool handler при каждом вызове. */
+export interface ToolContext extends PluginContext {
+	userId: string;
+	project: string;
+	cwd: string;
+	chatId?: number;
+	messageThreadId?: number;
+}
+
 // ─── Bot Context (grammy context extended) ──────────────────────
 
 export interface BotContext extends Context {
@@ -83,7 +93,7 @@ export interface ToolDefinition {
 	description: string;
 	schema: ZodType;
 	scope?: "self" | "all" | string[];
-	handler: (input: unknown, ctx: PluginContext) => Promise<string>;
+	handler: (input: unknown, ctx: ToolContext) => Promise<string>;
 }
 
 // ─── Commands ───────────────────────────────────────────────────
@@ -156,7 +166,8 @@ export function defineTool<TSchema extends z.ZodType>(def: {
 	name: string;
 	description: string;
 	schema: TSchema;
-	handler: (input: z.infer<TSchema>, ctx: PluginContext) => Promise<string>;
+	scope?: "self" | "all" | string[];
+	handler: (input: z.infer<TSchema>, ctx: ToolContext) => Promise<string>;
 }): ToolDefinition {
 	return def as ToolDefinition;
 }
