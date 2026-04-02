@@ -1,5 +1,5 @@
 import { join, resolve } from "node:path";
-import { run, sequentialize } from "@grammyjs/runner";
+import { run } from "@grammyjs/runner";
 import { getLogger } from "@logtape/logtape";
 import { runWizard } from "@setup/wizard.ts";
 import { Bot, type MiddlewareFn } from "grammy";
@@ -158,38 +158,7 @@ async function main() {
 		log.info("Message from user {userId} denied", { userId });
 	});
 
-	// 7. Message injection — inject into active channel if agent is busy
-	bot.use(async (ctx, next) => {
-		if (!ctx.message?.text || ctx.message.text.startsWith("/")) return next();
-
-		const userId = String(ctx.from?.id ?? "unknown");
-		const project = sessionManager.getActiveProject(userId);
-		const channel = sessionManager.getActiveChannel(userId, project);
-
-		if (channel && !channel.closed) {
-			const pushed = channel.push(ctx.message.text);
-			if (pushed) {
-				log.info(
-					"Message injected into active channel for {userId}:{project}",
-					{ userId, project },
-				);
-				return; // swallow update — message injected into running query
-			}
-		}
-
-		return next();
-	});
-
-	// 8. Sequentialize per user+project
-	bot.use(
-		sequentialize((ctx) => {
-			const userId = String(ctx.from?.id ?? "unknown");
-			const project = sessionManager.getActiveProject(userId);
-			return `${userId}:${project}`;
-		}),
-	);
-
-	// 9. Swappable plugin middleware
+	// 7. Swappable plugin middleware
 	let currentMiddleware: MiddlewareFn<BotContext> = (_ctx, next) => next();
 	bot.use((ctx, next) => currentMiddleware(ctx, next));
 
@@ -316,12 +285,28 @@ async function main() {
 	// Initial load
 	await reloadPlugins();
 
-	// ── Text message routing (core) ──
-	// Always routes text to Claude via executor. Plugins can modify
-	// behavior through renderMiddleware, resolveTarget, approvalHandler hooks.
-	bot.on("message:text", async (ctx) => {
+	// ── Message routing (core) ──
+	// Routes messages to Claude via executor. Plugins run before this handler
+	// and can set ctx.overrideText (e.g. file-handler for photos).
+	// Injection into a running agent is handled here (fast path before lock).
+	bot.on("message", async (ctx) => {
+		const text =
+			ctx.overrideText ?? ctx.message?.text ?? ctx.message?.caption ?? "";
+		if (!text) return;
+
 		const userId = String(ctx.from.id);
 		const project = sessionManager.getActiveProject(userId);
+
+		// Fast path: inject into running query
+		const activeChannel = sessionManager.getActiveChannel(userId, project);
+		if (activeChannel && !activeChannel.closed) {
+			activeChannel.push(text);
+			log.info("Message injected into active channel for {userId}:{project}", {
+				userId,
+				project,
+			});
+			return;
+		}
 
 		// Resolve target
 		let target: ResponseTarget = { chatId: ctx.chat.id };
@@ -338,13 +323,18 @@ async function main() {
 			}
 		}
 
-		// Create a streaming message channel for this query
-		const text = ctx.overrideText ?? ctx.message.text ?? "";
-		const channel = new MessageChannel();
-		channel.push(text);
-		sessionManager.setActiveChannel(userId, project, channel);
-
 		await sessionManager.withSessionLock(userId, project, async (signal) => {
+			// Double-check: channel may have appeared while waiting for lock
+			const ch = sessionManager.getActiveChannel(userId, project);
+			if (ch && !ch.closed) {
+				ch.push(text);
+				return;
+			}
+
+			const channel = new MessageChannel();
+			channel.push(text);
+			sessionManager.setActiveChannel(userId, project, channel);
+
 			try {
 				const result = await executor.handleMessage(
 					{
@@ -364,7 +354,6 @@ async function main() {
 					await ctx.reply(`Error: ${result.error.message}`).catch(() => {});
 				}
 
-				// Call afterQuery hooks in priority order. Errors logged, never break pipeline.
 				for (const { handler } of loadedPlugins.afterQueryHooks) {
 					try {
 						await handler(result, ctx);
