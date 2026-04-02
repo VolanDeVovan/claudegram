@@ -1,38 +1,38 @@
 /**
- * @plugin forum-routing
- * @description Maps Telegram forum topics to projects in group chats.
- *   Each project gets its own forum topic. Messages in a topic
+ * @plugin private-topic-routing
+ * @description Maps topics in private chats to projects.
+ *   Each project gets its own topic. Messages in a topic
  *   are automatically routed to the corresponding project session.
- *   Only activates in supergroups with forum topics enabled.
+ *   Only activates in private chats with topics enabled.
  * @priority 20
- * @config plugins.forum-routing.threadMap — Record<threadId, projectName>
- * @prerequisites The bot must be added to a supergroup with forum topics enabled
- *   (group settings → Topics → ON). At least two projects must be configured.
- * @postInstall Run /setup_topics in the group chat to create a forum topic per project
- *   and auto-configure threadMap.
+ * @config plugins.private-topic-routing.topicMap — Record<topicId, projectName>
+ * @prerequisites Bot must have "Threaded mode" enabled in BotFather.
+ *   This setting is only available through the BotFather Mini App (not via commands).
+ *   Open @BotFather in Telegram → tap the Mini App button (≡ menu) to launch it →
+ *   select your bot → Bot Settings → Threaded mode → Enable.
+ * @postInstall Run /setup_topics in the private chat to create a topic per project
+ *   and auto-configure topicMap.
  */
 import { definePlugin } from "@core/plugin-api.ts";
 import type { SessionManager } from "@core/session-manager.ts";
 import { z } from "zod";
 
 export default definePlugin({
-	name: "forum-routing",
-	description: "Routes forum topics to project sessions in group chats",
+	name: "private-topic-routing",
+	description: "Routes private chat topics to project sessions",
 	priority: 20,
 
 	configSchema: z.object({
-		threadMap: z.record(z.string(), z.string()).default({}),
+		topicMap: z.record(z.string(), z.string()).default({}),
 	}),
 
 	commands: {
 		setup_topics: {
-			description: "Create a forum topic per project and configure threadMap",
+			description: "Create a topic per project and configure topicMap",
 			handler: async (ctx) => {
 				const chatId = ctx.chat?.id;
-				if (!chatId || ctx.chat?.type !== "supergroup") {
-					await ctx.reply(
-						"This command only works in a supergroup with forum topics.",
-					);
+				if (!chatId || ctx.chat?.type !== "private") {
+					await ctx.reply("This command only works in a private chat.");
 					return;
 				}
 
@@ -46,8 +46,8 @@ export default definePlugin({
 
 				const existing =
 					ctx.pluginContext.config.get<{
-						threadMap?: Record<string, string>;
-					}>("plugins.forum-routing")?.threadMap ?? {};
+						topicMap?: Record<string, string>;
+					}>("plugins.private-topic-routing")?.topicMap ?? {};
 				const alreadyMapped = new Set(Object.values(existing));
 				const toCreate = projects.filter((p) => !alreadyMapped.has(p.name));
 
@@ -58,13 +58,13 @@ export default definePlugin({
 
 				await ctx.reply(`Creating ${toCreate.length} topic(s)…`);
 
-				const threadMap: Record<string, string> = { ...existing };
+				const topicMap: Record<string, string> = { ...existing };
 				const results: string[] = [];
 
 				for (const project of toCreate) {
 					try {
 						const topic = await ctx.api.createForumTopic(chatId, project.name);
-						threadMap[String(topic.message_thread_id)] = project.name;
+						topicMap[String(topic.message_thread_id)] = project.name;
 						results.push(
 							`✅ ${project.name} → topic ${topic.message_thread_id}`,
 						);
@@ -74,10 +74,10 @@ export default definePlugin({
 					}
 				}
 
-				if (Object.keys(threadMap).length > 0) {
+				if (Object.keys(topicMap).length > 0) {
 					ctx.pluginContext.config.set(
-						"plugins.forum-routing.threadMap",
-						threadMap,
+						"plugins.private-topic-routing.topicMap",
+						topicMap,
 					);
 				}
 
@@ -91,20 +91,20 @@ export default definePlugin({
 			const threadId = ctx.message?.message_thread_id;
 			if (!threadId) return next();
 
-			// Only handle forum topics in supergroups
+			// Only handle topics in private chats
 			const chatType = ctx.chat?.type;
-			if (chatType !== "supergroup") return next();
+			if (chatType !== "private") return next();
 
 			const threadKey = String(threadId);
 			const cfg = ctx.pluginContext.config.get<{
-				threadMap?: Record<string, string>;
-			}>("plugins.forum-routing");
-			const projectName = cfg?.threadMap?.[threadKey];
+				topicMap?: Record<string, string>;
+			}>("plugins.private-topic-routing");
+			const projectName = cfg?.topicMap?.[threadKey];
 
 			if (projectName) {
 				const userId = String(ctx.from?.id);
 				const sessions = ctx.pluginContext.sessions as SessionManager;
-				// Switch active project to match the forum topic
+				// Switch active project to match the topic
 				sessions.setActiveProject(userId, projectName);
 				// Resume existing session if any
 				const active = sessions.getActive(userId, projectName);
