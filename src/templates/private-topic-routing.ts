@@ -14,7 +14,6 @@
  *   and auto-configure topicMap.
  */
 import { definePlugin } from "@core/plugin-api.ts";
-import type { SessionManager } from "@core/session-manager.ts";
 import { z } from "zod";
 
 export default definePlugin({
@@ -25,6 +24,32 @@ export default definePlugin({
 	configSchema: z.object({
 		topicMap: z.record(z.string(), z.string()).default({}),
 	}),
+
+	resolveContext(ctx, pluginCtx) {
+		if (ctx.chat?.type !== "private") return null;
+		if (!ctx.from?.id) return null;
+		const threadId = ctx.message?.message_thread_id;
+		if (!threadId) return null;
+
+		const threadKey = String(threadId);
+		const cfg = pluginCtx.config.get<{
+			topicMap?: Record<string, string>;
+		}>("plugins.private-topic-routing");
+		const project = cfg?.topicMap?.[threadKey];
+		if (!project) return null;
+
+		const scope = `${ctx.from.id}:${threadKey}`;
+		return {
+			scope,
+			project,
+			target: {
+				chatId: ctx.chat.id,
+				messageThreadId: threadId,
+				scope,
+				project,
+			},
+		};
+	},
 
 	commands: {
 		setup_topics: {
@@ -85,34 +110,4 @@ export default definePlugin({
 			},
 		},
 	},
-
-	middleware: [
-		async (ctx, next) => {
-			const threadId = ctx.message?.message_thread_id;
-			if (!threadId) return next();
-
-			// Only handle topics in private chats
-			const chatType = ctx.chat?.type;
-			if (chatType !== "private") return next();
-
-			const threadKey = String(threadId);
-			const cfg = ctx.pluginContext.config.get<{
-				topicMap?: Record<string, string>;
-			}>("plugins.private-topic-routing");
-			const projectName = cfg?.topicMap?.[threadKey];
-
-			if (projectName) {
-				const userId = String(ctx.from?.id);
-				const sessions = ctx.pluginContext.sessions as SessionManager;
-				// Switch active project to match the topic
-				sessions.setActiveProject(userId, projectName);
-				// Resume existing session if any
-				const active = sessions.getActive(userId, projectName);
-				if (active) {
-					sessions.activate(active.id);
-				}
-			}
-			await next();
-		},
-	],
 });

@@ -6,7 +6,6 @@ import { Bot, type MiddlewareFn } from "grammy";
 import { ConfigManager } from "./config.ts";
 import { createPluginCommands, registerCoreCommands } from "./core-commands.ts";
 import { createCoreTools } from "./core-tools.ts";
-import { initDatabase } from "./database.ts";
 import { Executor } from "./executor.ts";
 import { GenerationManager } from "./generation-manager.ts";
 import { initLogger } from "./logger.ts";
@@ -22,12 +21,14 @@ import {
 	type LoadedPlugins,
 	loadPlugins,
 } from "./plugin-loader.ts";
+import { JsonScopeStore } from "./scope-store.ts";
 import { SessionManager } from "./session-manager.ts";
 
 const BOT_ROOT = resolve(process.cwd());
 const DATA_DIR = join(BOT_ROOT, "data");
 const CONFIG_PATH = join(DATA_DIR, "config.jsonc");
-const DB_PATH = join(DATA_DIR, "bot.db");
+const SESSIONS_PATH = join(DATA_DIR, "sessions.json");
+const SCOPE_DIR = join(DATA_DIR, "scope");
 const LOGS_DIR = join(DATA_DIR, "logs");
 const PLUGINS_DIR = join(BOT_ROOT, "plugins");
 const GENERATIONS_DIR = join(DATA_DIR, "generations");
@@ -57,11 +58,9 @@ async function main() {
 		]);
 	}
 
-	// Init database
-	const db = initDatabase(DB_PATH);
-
-	// Init session manager
-	const sessionManager = new SessionManager(db, config);
+	// Init storage
+	const scopeStore = new JsonScopeStore(SCOPE_DIR);
+	const sessionManager = new SessionManager(SESSIONS_PATH, config);
 
 	// Init generation manager
 	const generationManager = new GenerationManager(GENERATIONS_DIR, PLUGINS_DIR);
@@ -69,7 +68,8 @@ async function main() {
 	// Create bot
 	const bot = new Bot<BotContext>(config.data.botToken);
 
-	// ── Core middleware (before plugins) ──
+	// ── Core middleware chain ──
+	// Order: stale → dedup → log → pluginContext → scope resolution → auth → core commands → plugin middleware → message handler
 
 	const bootTime = Date.now();
 
@@ -94,7 +94,7 @@ async function main() {
 		await next();
 	});
 
-	// 3. Log all commands (uses Telegram bot_command entities)
+	// 3. Log all commands
 	bot.use(async (ctx, next) => {
 		const entities = ctx.message?.entities ?? ctx.channelPost?.entities ?? [];
 		const text = ctx.message?.text ?? ctx.channelPost?.text ?? "";
@@ -117,19 +117,40 @@ async function main() {
 		await next();
 	});
 
-	// 5. /cancel, /ping, /rollback — bypass queue
-	registerCoreCommands(
-		bot,
-		sessionManager,
-		config,
-		() => loadedPlugins,
-		generationManager,
-		reloadPlugins,
-	);
-
-	// 6. Owner auth
+	// 5. Scope resolution middleware — sets ctx.userId, ctx.scope, ctx.project
 	bot.use(async (ctx, next) => {
 		const userId = String(ctx.from?.id);
+		ctx.userId = userId;
+
+		// Try plugin resolveContext hooks (chain, first non-null wins)
+		let resolved = false;
+		for (const { resolver } of loadedPlugins.contextResolvers) {
+			const result = await resolver(ctx, currentPluginCtx);
+			if (result) {
+				ctx.scope = result.scope;
+				ctx.project = result.project;
+				// Store target if provided by resolver
+				if (result.target) {
+					ctx.resolvedTarget = result.target;
+				}
+				resolved = true;
+				break;
+			}
+		}
+
+		if (!resolved) {
+			// Core fallback: scope = userId, project = "self"
+			// Multi-project routing is entirely a plugin responsibility (resolveContext + scopeStore)
+			ctx.scope = userId;
+			ctx.project = "self";
+		}
+
+		await next();
+	});
+
+	// 6. Owner auth + plugin authChecks
+	bot.use(async (ctx, next) => {
+		const userId = ctx.userId;
 		if (!userId) return;
 
 		if (userId === config.data.owner) {
@@ -158,7 +179,16 @@ async function main() {
 		log.info("Message from user {userId} denied", { userId });
 	});
 
-	// 7. Swappable plugin middleware
+	// 7. Core commands — AFTER auth, no guarded() needed
+	registerCoreCommands(
+		bot,
+		sessionManager,
+		config,
+		generationManager,
+		reloadPlugins,
+	);
+
+	// 8. Swappable plugin middleware
 	let currentMiddleware: MiddlewareFn<BotContext> = (_ctx, next) => next();
 	bot.use((ctx, next) => currentMiddleware(ctx, next));
 
@@ -167,9 +197,9 @@ async function main() {
 	let loadedPlugins: LoadedPlugins = {
 		plugins: [],
 		errors: [],
-		resolveTarget: null,
-		approvalHandlers: [],
+		contextResolvers: [],
 		authChecks: [],
+		beforeQueryHooks: [],
 		afterQueryHooks: [],
 		renderMiddlewares: [],
 		tools: [],
@@ -189,7 +219,7 @@ async function main() {
 		config,
 		sessionManager,
 		bot,
-		db,
+		scopeStore,
 		botRoot: BOT_ROOT,
 		pluginsDir: PLUGINS_DIR,
 		coreTools,
@@ -200,7 +230,7 @@ async function main() {
 	currentPluginCtx = {
 		bot,
 		config,
-		db,
+		scopeStore,
 		query: executor.createQueryFn(),
 		sessions: sessionManager,
 	};
@@ -211,12 +241,29 @@ async function main() {
 		clear: "Clear current session",
 	};
 
+	// Reload safety
+	let activeQueries = 0;
+	const RELOAD_TIMEOUT_MS = 10_000;
+
 	async function reloadPlugins(): Promise<{
 		loaded: string[];
 		errors: string[];
 	}> {
 		const reloadLog = getLogger(["bot", "reload"]);
 		reloadLog.info("Reload started");
+
+		// Wait for active queries to finish
+		const start = Date.now();
+		while (activeQueries > 0) {
+			if (Date.now() - start > RELOAD_TIMEOUT_MS) {
+				reloadLog.warn(
+					"Reload timeout: {count} queries still active, force-disposing",
+					{ count: activeQueries },
+				);
+				break;
+			}
+			await new Promise((r) => setTimeout(r, 100));
+		}
 
 		// Dispose current plugins
 		await disposePlugins(loadedPlugins.plugins);
@@ -225,11 +272,7 @@ async function main() {
 		const newLoaded = await loadPlugins(PLUGINS_DIR, currentPluginCtx, config);
 
 		// Add core commands as plugin commands
-		const coreCmds = createPluginCommands(
-			sessionManager,
-			config,
-			() => newLoaded,
-		);
+		const coreCmds = createPluginCommands(sessionManager, config);
 		for (const [name, handler] of Object.entries(coreCmds)) {
 			if (!newLoaded.commands.has(name)) {
 				newLoaded.commands.set(name, {
@@ -261,13 +304,14 @@ async function main() {
 				description: description ?? `/${name}`,
 			});
 		}
-		await bot.api.setMyCommands(botCommands);
+		await bot.api.setMyCommands(botCommands, {
+			scope: { type: "all_private_chats" },
+		});
 
 		const loadedNames = loadedPlugins.plugins.map((p) => p.name);
 		const errorMsgs = loadedPlugins.errors.map((e) => `${e.path}: ${e.error}`);
 
 		if (loadedPlugins.errors.length === 0) {
-			// Create generation on successful reload
 			generationManager.create(
 				`Reload: ${loadedNames.join(", ") || "no plugins"}`,
 			);
@@ -287,46 +331,57 @@ async function main() {
 	await reloadPlugins();
 
 	// ── Message routing (core) ──
-	// Routes messages to Claude via executor. Plugins run before this handler
-	// and can set ctx.overrideText (e.g. file-handler for photos).
-	// Injection into a running agent is handled here (fast path before lock).
 	bot.on("message", async (ctx) => {
 		const text =
 			ctx.overrideText ?? ctx.message?.text ?? ctx.message?.caption ?? "";
 		if (!text) return;
 
-		const userId = String(ctx.from.id);
-		const project = sessionManager.getActiveProject(userId);
+		const { userId, scope, project } = ctx;
 
 		// Fast path: inject into running query
-		const activeChannel = sessionManager.getActiveChannel(userId, project);
+		const activeChannel = sessionManager.getActiveChannel(scope, project);
 		if (activeChannel && !activeChannel.closed) {
 			activeChannel.push(text);
-			log.info("Message injected into active channel for {userId}:{project}", {
-				userId,
+			log.info("Message injected into active channel for {scope}:{project}", {
+				scope,
 				project,
 			});
 			return;
 		}
 
 		// Resolve target
-		let target: ResponseTarget = { chatId: ctx.chat.id };
+		let target: ResponseTarget = {
+			chatId: ctx.chat.id,
+			scope,
+			project,
+		};
 		if (ctx.message.message_thread_id) {
 			target.messageThreadId = ctx.message.message_thread_id;
 		}
-		if (loadedPlugins.resolveTarget) {
+		// Use target from resolveContext if available
+		if (ctx.resolvedTarget) {
+			target = ctx.resolvedTarget;
+		}
+
+		// beforeQuery hooks
+		for (const { handler } of loadedPlugins.beforeQueryHooks) {
 			try {
-				target = loadedPlugins.resolveTarget(userId, project, ctx);
+				await handler({ message: text, userId, scope, project }, ctx);
 			} catch (e) {
-				log.error("resolveTarget error: {error}", {
+				log.error("beforeQuery hook error: {error}", {
 					error: e instanceof Error ? e.message : String(e),
 				});
+				// Thrown = abort query
+				if (e instanceof Error) {
+					await ctx.reply(`Blocked: ${e.message}`).catch(() => {});
+				}
+				return;
 			}
 		}
 
-		await sessionManager.withSessionLock(userId, project, async (signal) => {
+		await sessionManager.withSessionLock(scope, project, async (signal) => {
 			// Double-check: channel may have appeared while waiting for lock
-			const ch = sessionManager.getActiveChannel(userId, project);
+			const ch = sessionManager.getActiveChannel(scope, project);
 			if (ch && !ch.closed) {
 				ch.push(text);
 				return;
@@ -334,13 +389,15 @@ async function main() {
 
 			const channel = new MessageChannel();
 			channel.push(text);
-			sessionManager.setActiveChannel(userId, project, channel);
+			sessionManager.setActiveChannel(scope, project, channel);
 
+			activeQueries++;
 			try {
 				const result = await executor.handleMessage(
 					{
 						message: text,
 						userId,
+						scope,
 						project,
 						signal,
 						channel,
@@ -365,8 +422,9 @@ async function main() {
 					}
 				}
 			} finally {
+				activeQueries--;
 				channel.close();
-				sessionManager.removeActiveChannel(userId, project);
+				sessionManager.removeActiveChannel(scope, project);
 			}
 		});
 	});
@@ -378,8 +436,6 @@ async function main() {
 		owner: config.data.owner,
 	});
 
-	// Use runner for concurrent update processing —
-	// allows /cancel to arrive while agent is working
 	const runner = run(bot);
 	log.info("Polling started (concurrent runner)");
 

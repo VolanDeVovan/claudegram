@@ -1,4 +1,11 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import { getLogger } from "@logtape/logtape";
 import {
 	applyEdits,
@@ -41,6 +48,12 @@ export const BaseConfigSchema = z.object({
 	model: z.string().default("sonnet"),
 	maxTurns: z.number().default(200),
 	sessionTimeoutHours: z.number().default(24),
+	maxSessions: z
+		.number()
+		.default(300)
+		.describe(
+			"Max sessions to keep in sessions.json. Oldest inactive pruned first.",
+		),
 	plugins: z.record(z.string(), z.unknown()).default({}),
 	coreTools: z
 		.record(
@@ -63,11 +76,14 @@ export class ConfigManager {
 	private rawContent: string;
 	private parsed: BotConfig;
 	private pluginSchemas = new Map<string, z.ZodType>();
+	private historyDir: string;
 
 	constructor(filePath: string) {
 		this.filePath = filePath;
 		this.rawContent = readFileSync(filePath, "utf-8");
 		this.parsed = BaseConfigSchema.parse(parse(this.rawContent));
+		this.historyDir = join(dirname(filePath), "config-history");
+		mkdirSync(this.historyDir, { recursive: true });
 	}
 
 	get data(): BotConfig {
@@ -137,6 +153,9 @@ export class ConfigManager {
 			}
 		}
 
+		// Snapshot current state before mutation
+		this.snapshot();
+
 		// Apply edit preserving JSONC comments
 		const edits = modify(this.rawContent, path, value, {
 			formattingOptions: FORMATTING,
@@ -172,6 +191,34 @@ export class ConfigManager {
 				);
 			}
 		}
+	}
+
+	private snapshot(): void {
+		const snapshotPath = join(this.historyDir, `${Date.now()}.jsonc`);
+		writeFileSync(snapshotPath, this.rawContent, "utf-8");
+	}
+
+	history(): Array<{ timestamp: number }> {
+		if (!existsSync(this.historyDir)) return [];
+		return readdirSync(this.historyDir)
+			.filter((f) => f.endsWith(".jsonc"))
+			.map((f) => ({ timestamp: Number.parseInt(f.replace(".jsonc", ""), 10) }))
+			.filter((e) => !Number.isNaN(e.timestamp))
+			.sort((a, b) => b.timestamp - a.timestamp);
+	}
+
+	revert(timestamp: number): void {
+		const snapshotPath = join(this.historyDir, `${timestamp}.jsonc`);
+		if (!existsSync(snapshotPath)) {
+			throw new Error(`Config snapshot ${timestamp} not found`);
+		}
+		const content = readFileSync(snapshotPath, "utf-8");
+		// Validate before applying
+		BaseConfigSchema.parse(parse(content));
+		writeFileSync(this.filePath, content, "utf-8");
+		this.rawContent = content;
+		this.parsed = BaseConfigSchema.parse(parse(content));
+		log.info("Config reverted to snapshot {timestamp}", { timestamp });
 	}
 
 	reload(): void {

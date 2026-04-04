@@ -2,7 +2,6 @@ import type { Bot } from "grammy";
 import type { ConfigManager } from "./config.ts";
 import type { GenerationManager } from "./generation-manager.ts";
 import type { BotContext } from "./plugin-api.ts";
-import type { LoadedPlugins } from "./plugin-loader.ts";
 import type { SessionManager } from "./session-manager.ts";
 
 const startedAt = Date.now();
@@ -10,16 +9,15 @@ const startedAt = Date.now();
 export function registerCoreCommands(
 	bot: Bot<BotContext>,
 	sessionManager: SessionManager,
-	_config: ConfigManager,
-	_getLoadedPlugins: () => LoadedPlugins,
+	config: ConfigManager,
 	generationManager: GenerationManager,
 	reloadPlugins: () => Promise<{ loaded: string[]; errors: string[] }>,
 ): void {
-	// /cancel, /ping, /rollback bypass sequentialize — registered BEFORE middleware
+	// Core commands registered AFTER auth middleware — no guarded() needed
+
 	bot.command("cancel", async (ctx) => {
-		const userId = String(ctx.from?.id);
-		const project = sessionManager.getActiveProject(userId);
-		const cancelled = sessionManager.cancelQuery(userId, project);
+		const { scope, project } = ctx;
+		const cancelled = sessionManager.cancelQuery(scope, project);
 		if (cancelled) {
 			await ctx.reply("Cancelled.");
 		} else {
@@ -60,16 +58,10 @@ export function registerCoreCommands(
 export function createPluginCommands(
 	sessionManager: SessionManager,
 	config: ConfigManager,
-	getLoadedPlugins: () => LoadedPlugins,
 ): Record<string, (ctx: BotContext) => Promise<void>> {
 	return {
 		start: async (ctx) => {
-			const plugins = getLoadedPlugins();
-			const _project = sessionManager.getActiveProject(String(ctx.from?.id));
 			const projects = config.data.projects.filter((p) => p.name !== "self");
-			const pluginList =
-				plugins.plugins.map((p) => p.name).join(", ") || "none";
-
 			let msg =
 				"Hi! I'm a Claude-powered bot that configures itself through this chat.\n\n" +
 				"Just tell me what you need — I'll write plugins and apply them live.\n" +
@@ -81,25 +73,22 @@ export function createPluginCommands(
 			if (projects.length > 0) {
 				msg += `Projects: ${projects.map((p) => p.name).join(", ")}\n`;
 			}
-			msg += `Plugins: ${pluginList}\n`;
 			msg += "Commands: /new /clear /cancel /ping";
 
 			await ctx.reply(msg);
 		},
 
 		new: async (ctx) => {
-			const userId = String(ctx.from?.id);
-			const project = sessionManager.getActiveProject(userId);
-			sessionManager.clearSession(userId, project);
+			const { scope, project } = ctx;
+			await sessionManager.clearSession(scope, project);
 			await ctx.reply(
 				"Session cleared. Next message starts a new conversation.",
 			);
 		},
 
 		clear: async (ctx) => {
-			const userId = String(ctx.from?.id);
-			const project = sessionManager.getActiveProject(userId);
-			sessionManager.clearSession(userId, project);
+			const { scope, project } = ctx;
+			await sessionManager.clearSession(scope, project);
 			await ctx.reply("Session cleared.");
 		},
 	};

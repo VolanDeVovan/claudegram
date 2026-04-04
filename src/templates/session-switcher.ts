@@ -54,9 +54,8 @@ export default definePlugin({
 			if (!data?.startsWith(PREFIX)) return next();
 
 			const sessionId = data.slice(PREFIX.length);
-			const userId = String(ctx.from?.id);
 			const sessions = ctx.pluginContext.sessions;
-			const allSessions = sessions.list(userId);
+			const allSessions = await sessions.list(ctx.scope);
 			const target = allSessions.find((s) => s.id === sessionId);
 
 			if (!target) {
@@ -72,9 +71,9 @@ export default definePlugin({
 				return;
 			}
 
-			sessions.activate(target.id);
+			await sessions.activate(target.id);
 
-			const updated = sessions.list(userId);
+			const updated = await sessions.list(ctx.scope);
 			const kb = buildKeyboard(updated);
 			await ctx.editMessageText("Sessions:", { reply_markup: kb });
 			await ctx.answerCallbackQuery({
@@ -87,8 +86,7 @@ export default definePlugin({
 		sessions: {
 			description: "List all sessions for the current project",
 			handler: async (ctx) => {
-				const userId = String(ctx.from?.id);
-				const allSessions = ctx.pluginContext.sessions.list(userId);
+				const allSessions = await ctx.pluginContext.sessions.list(ctx.scope);
 
 				if (!allSessions.length) {
 					await ctx.reply("No sessions found.");
@@ -107,9 +105,7 @@ export default definePlugin({
 				const num = Number.parseInt(arg, 10);
 
 				if (!arg || Number.isNaN(num)) {
-					// No valid number — show keyboard
-					const userId = String(ctx.from?.id);
-					const allSessions = ctx.pluginContext.sessions.list(userId);
+					const allSessions = await ctx.pluginContext.sessions.list(ctx.scope);
 					if (!allSessions.length) {
 						await ctx.reply("No sessions found.");
 						return;
@@ -119,8 +115,7 @@ export default definePlugin({
 					return;
 				}
 
-				const userId = String(ctx.from?.id);
-				const allSessions = ctx.pluginContext.sessions.list(userId);
+				const allSessions = await ctx.pluginContext.sessions.list(ctx.scope);
 				const target = allSessions[num - 1];
 
 				if (!target) {
@@ -130,7 +125,7 @@ export default definePlugin({
 					return;
 				}
 
-				ctx.pluginContext.sessions.activate(target.id);
+				await ctx.pluginContext.sessions.activate(target.id);
 				await ctx.reply(
 					`Resumed session in ${target.projectName} (${target.turns} turns).`,
 				);
@@ -140,8 +135,7 @@ export default definePlugin({
 		continue: {
 			description: "Resume the most recent inactive session",
 			handler: async (ctx) => {
-				const userId = String(ctx.from?.id);
-				const allSessions = ctx.pluginContext.sessions.list(userId);
+				const allSessions = await ctx.pluginContext.sessions.list(ctx.scope);
 				const latest = allSessions
 					.filter((s) => !s.isActive)
 					.sort(
@@ -154,7 +148,7 @@ export default definePlugin({
 					return;
 				}
 
-				ctx.pluginContext.sessions.activate(latest.id);
+				await ctx.pluginContext.sessions.activate(latest.id);
 				await ctx.reply(
 					`Continued session in ${latest.projectName} (${latest.turns} turns, ${timeSince(latest.lastUsed)} ago).`,
 				);

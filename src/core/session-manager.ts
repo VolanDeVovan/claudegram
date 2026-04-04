@@ -1,25 +1,25 @@
-import type { Database } from "bun:sqlite";
 import { getLogger } from "@logtape/logtape";
 import type { ConfigManager } from "./config.ts";
+import { JsonStore } from "./json-store.ts";
 import type { MessageChannel } from "./message-channel.ts";
 import type { SessionAPI, SessionInfo } from "./plugin-api.ts";
 
 const log = getLogger(["bot", "session"]);
 
 export class SessionManager implements SessionAPI {
-	private db: Database;
+	private store: JsonStore<SessionInfo[]>;
 	private config: ConfigManager;
 	private sessionLocks = new Map<string, Promise<void>>();
 	private activeControllers = new Map<string, AbortController>();
 	private activeChannels = new Map<string, MessageChannel>();
 
-	constructor(db: Database, config: ConfigManager) {
-		this.db = db;
+	constructor(sessionsPath: string, config: ConfigManager) {
+		this.store = new JsonStore(sessionsPath, []);
 		this.config = config;
 	}
 
-	private lockKey(userId: string, project: string): string {
-		return `${userId}:${project}`;
+	private lockKey(scope: string, project: string): string {
+		return `${scope}:${project}`;
 	}
 
 	private isExpired(lastUsed: string): boolean {
@@ -29,147 +29,160 @@ export class SessionManager implements SessionAPI {
 
 	// ── SessionAPI ──
 
-	list(userId: string, projectName?: string): SessionInfo[] {
-		const query = projectName
-			? this.db
-					.query<SessionRow, [string, string]>(
-						"SELECT * FROM sessions WHERE user_id = ? AND project_name = ? ORDER BY last_used DESC",
-					)
-					.all(userId, projectName)
-			: this.db
-					.query<SessionRow, [string]>(
-						"SELECT * FROM sessions WHERE user_id = ? ORDER BY last_used DESC",
-					)
-					.all(userId);
-
-		return query.map(rowToInfo);
+	async list(scope: string, projectName?: string): Promise<SessionInfo[]> {
+		const all = await this.store.read();
+		return all
+			.filter(
+				(s) =>
+					s.scope === scope && (!projectName || s.projectName === projectName),
+			)
+			.sort(
+				(a, b) =>
+					new Date(b.lastUsed).getTime() - new Date(a.lastUsed).getTime(),
+			);
 	}
 
-	activate(sessionId: string): void {
-		const session = this.db
-			.query<SessionRow, [string]>("SELECT * FROM sessions WHERE id = ?")
-			.get(sessionId);
-		if (!session) throw new Error(`Session ${sessionId} not found`);
+	async activate(sessionId: string): Promise<void> {
+		await this.store.update((sessions) => {
+			const target = sessions.find((s) => s.id === sessionId);
+			if (!target) throw new Error(`Session ${sessionId} not found`);
 
-		// Deactivate current active session for this user+project
-		this.db
-			.query(
-				"UPDATE sessions SET is_active = 0 WHERE user_id = ? AND project_name = ? AND is_active = 1",
-			)
-			.run(session.user_id, session.project_name);
-
-		// Activate target
-		this.db
-			.query("UPDATE sessions SET is_active = 1, last_used = ? WHERE id = ?")
-			.run(new Date().toISOString(), sessionId);
-
-		log.info("Session {id} activated for user {user} project {project}", {
-			id: sessionId,
-			user: session.user_id,
-			project: session.project_name,
+			return sessions.map((s) => {
+				if (
+					s.scope === target.scope &&
+					s.projectName === target.projectName &&
+					s.isActive
+				) {
+					return { ...s, isActive: false };
+				}
+				if (s.id === sessionId) {
+					return {
+						...s,
+						isActive: true,
+						lastUsed: new Date().toISOString(),
+					};
+				}
+				return s;
+			});
 		});
+
+		log.info("Session {id} activated", { id: sessionId });
 	}
 
-	getActive(userId: string, projectName: string): SessionInfo | null {
-		const row = this.db
-			.query<SessionRow, [string, string]>(
-				"SELECT * FROM sessions WHERE user_id = ? AND project_name = ? AND is_active = 1",
-			)
-			.get(userId, projectName);
-		return row ? rowToInfo(row) : null;
+	async getActive(
+		scope: string,
+		projectName: string,
+	): Promise<SessionInfo | null> {
+		const all = await this.store.read();
+		return (
+			all.find(
+				(s) => s.scope === scope && s.projectName === projectName && s.isActive,
+			) ?? null
+		);
 	}
 
 	// ── Session lifecycle ──
 
-	getActiveSessionId(userId: string, projectName: string): string | null {
-		const row = this.db
-			.query<SessionRow, [string, string]>(
-				"SELECT * FROM sessions WHERE user_id = ? AND project_name = ? AND is_active = 1",
-			)
-			.get(userId, projectName);
-
-		if (!row) return null;
-		if (this.isExpired(row.last_used)) {
-			this.deactivateSession(row.id);
-			log.info("Session {id} expired", { id: row.id });
+	async getActiveSessionId(
+		scope: string,
+		projectName: string,
+	): Promise<string | null> {
+		const session = await this.getActive(scope, projectName);
+		if (!session) return null;
+		if (this.isExpired(session.lastUsed)) {
+			await this.deactivateSession(session.id);
+			log.info("Session {id} expired", { id: session.id });
 			return null;
 		}
-		return row.id;
+		return session.id;
 	}
 
-	deactivateSession(sessionId: string): void {
-		this.db
-			.query("UPDATE sessions SET is_active = 0 WHERE id = ?")
-			.run(sessionId);
+	async deactivateSession(sessionId: string): Promise<void> {
+		await this.store.update((sessions) =>
+			sessions.map((s) => (s.id === sessionId ? { ...s, isActive: false } : s)),
+		);
 	}
 
-	createSession(sessionId: string, userId: string, projectName: string): void {
+	async createSession(
+		sessionId: string,
+		scope: string,
+		projectName: string,
+	): Promise<void> {
+		const maxSessions = this.config.data.maxSessions;
 		const now = new Date().toISOString();
-		// Deactivate any existing active session
-		this.db
-			.query(
-				"UPDATE sessions SET is_active = 0 WHERE user_id = ? AND project_name = ? AND is_active = 1",
-			)
-			.run(userId, projectName);
-		this.db
-			.query(
-				"INSERT INTO sessions (id, user_id, project_name, created_at, last_used, turns, cost_usd, is_active) VALUES (?, ?, ?, ?, ?, 0, 0, 1)",
-			)
-			.run(sessionId, userId, projectName, now, now);
-		log.info("Session {id} created for user {user} project {project}", {
+		await this.store.update((sessions) => {
+			// Deactivate existing active sessions for this scope+project
+			const updated = sessions.map((s) =>
+				s.scope === scope && s.projectName === projectName && s.isActive
+					? { ...s, isActive: false }
+					: s,
+			);
+			updated.push({
+				id: sessionId,
+				scope,
+				projectName,
+				createdAt: now,
+				lastUsed: now,
+				turns: 0,
+				costUsd: 0,
+				isActive: true,
+			});
+			// Prune: keep active + newest inactive up to maxSessions
+			if (updated.length > maxSessions) {
+				const active = updated.filter((s) => s.isActive);
+				const inactive = updated
+					.filter((s) => !s.isActive)
+					.sort(
+						(a, b) =>
+							new Date(b.lastUsed).getTime() - new Date(a.lastUsed).getTime(),
+					);
+				return [...active, ...inactive].slice(0, maxSessions);
+			}
+			return updated;
+		});
+		log.info("Session {id} created for scope {scope} project {project}", {
 			id: sessionId,
-			user: userId,
+			scope,
 			project: projectName,
 		});
 	}
 
-	updateSession(sessionId: string, turns: number, costUsd: number): void {
-		this.db
-			.query(
-				"UPDATE sessions SET last_used = ?, turns = ?, cost_usd = ? WHERE id = ?",
-			)
-			.run(new Date().toISOString(), turns, costUsd, sessionId);
+	async updateSession(
+		sessionId: string,
+		turns: number,
+		costUsd: number,
+	): Promise<void> {
+		await this.store.update((sessions) =>
+			sessions.map((s) =>
+				s.id === sessionId
+					? { ...s, lastUsed: new Date().toISOString(), turns, costUsd }
+					: s,
+			),
+		);
 	}
 
-	clearSession(userId: string, projectName: string): void {
-		this.db
-			.query(
-				"UPDATE sessions SET is_active = 0 WHERE user_id = ? AND project_name = ? AND is_active = 1",
-			)
-			.run(userId, projectName);
-		log.info("Session cleared for user {user} project {project}", {
-			user: userId,
+	async clearSession(scope: string, projectName: string): Promise<void> {
+		await this.store.update((sessions) =>
+			sessions.map((s) =>
+				s.scope === scope && s.projectName === projectName && s.isActive
+					? { ...s, isActive: false }
+					: s,
+			),
+		);
+		log.info("Session cleared for scope {scope} project {project}", {
+			scope,
 			project: projectName,
 		});
-	}
-
-	// ── User state ──
-
-	getActiveProject(userId: string): string {
-		const row = this.db
-			.query<{ active_project: string }, [string]>(
-				"SELECT active_project FROM user_state WHERE user_id = ?",
-			)
-			.get(userId);
-		return row?.active_project ?? this.config.data.defaultProject;
-	}
-
-	setActiveProject(userId: string, project: string): void {
-		this.db
-			.query(
-				"INSERT INTO user_state (user_id, active_project) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET active_project = ?",
-			)
-			.run(userId, project, project);
 	}
 
 	// ── Concurrency ──
 
 	async withSessionLock<T>(
-		userId: string,
+		scope: string,
 		project: string,
 		fn: (signal: AbortSignal) => Promise<T>,
 	): Promise<T> {
-		const key = this.lockKey(userId, project);
+		const key = this.lockKey(scope, project);
 		const controller = new AbortController();
 		this.activeControllers.set(key, controller);
 
@@ -195,29 +208,25 @@ export class SessionManager implements SessionAPI {
 
 	// ── Message channels (streaming input) ──
 
-	getActiveChannel(
-		userId: string,
-		project: string,
-	): MessageChannel | undefined {
-		return this.activeChannels.get(this.lockKey(userId, project));
+	getActiveChannel(scope: string, project: string): MessageChannel | undefined {
+		return this.activeChannels.get(this.lockKey(scope, project));
 	}
 
 	setActiveChannel(
-		userId: string,
+		scope: string,
 		project: string,
 		channel: MessageChannel,
 	): void {
-		this.activeChannels.set(this.lockKey(userId, project), channel);
+		this.activeChannels.set(this.lockKey(scope, project), channel);
 	}
 
-	removeActiveChannel(userId: string, project: string): void {
-		this.activeChannels.delete(this.lockKey(userId, project));
+	removeActiveChannel(scope: string, project: string): void {
+		this.activeChannels.delete(this.lockKey(scope, project));
 	}
 
-	cancelQuery(userId: string, project: string): boolean {
-		const key = this.lockKey(userId, project);
+	cancelQuery(scope: string, project: string): boolean {
+		const key = this.lockKey(scope, project);
 
-		// Flush and close the message channel (discards pending messages)
 		const channel = this.activeChannels.get(key);
 		if (channel) {
 			channel.flush();
@@ -231,27 +240,4 @@ export class SessionManager implements SessionAPI {
 		}
 		return false;
 	}
-}
-
-interface SessionRow {
-	id: string;
-	user_id: string;
-	project_name: string;
-	created_at: string;
-	last_used: string;
-	turns: number;
-	cost_usd: number;
-	is_active: number;
-}
-
-function rowToInfo(row: SessionRow): SessionInfo {
-	return {
-		id: row.id,
-		projectName: row.project_name,
-		createdAt: row.created_at,
-		lastUsed: row.last_used,
-		turns: row.turns,
-		costUsd: row.cost_usd,
-		isActive: row.is_active === 1,
-	};
 }

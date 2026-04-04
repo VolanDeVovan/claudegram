@@ -72,8 +72,7 @@ export default definePlugin({
 			const fileInfo = getFileInfo(msg);
 			if (!fileInfo) return next();
 
-			const userId = String(ctx.from?.id);
-			const project = ctx.pluginContext.sessions.getActiveProject(userId);
+			const project = ctx.project;
 			const projectConfig = ctx.pluginContext.config.data.projects.find(
 				(p) => p.name === project,
 			);
@@ -95,7 +94,7 @@ export default definePlugin({
 					error: e instanceof Error ? e.message : String(e),
 				});
 				await ctx.reply(
-					`Не удалось скачать файл, попробуй ещё раз\n\n${e instanceof Error ? e.message : String(e)}`,
+					`Failed to download file, please try again\n\n${e instanceof Error ? e.message : String(e)}`,
 				);
 				return;
 			}
@@ -113,7 +112,7 @@ export default definePlugin({
 						// biome-ignore lint/style/noNonNullAssertion: timer is set immediately below
 						timer: null! as Timer,
 						cwd,
-						userId,
+						userId: ctx.userId,
 						project,
 					};
 					mediaGroupBuffer.set(groupId, group);
@@ -285,7 +284,6 @@ function getFileInfo(msg: any): { fileId: string; filename: string } | null {
 			filename: uniqueName("videonote", "mp4"),
 		};
 	}
-	// Stickers and unsupported types — skip
 	return null;
 }
 

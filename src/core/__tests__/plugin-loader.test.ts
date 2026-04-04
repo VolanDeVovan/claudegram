@@ -15,7 +15,7 @@ const PLUGINS_DIR = join(TEST_DIR, "plugins");
 const mockPluginCtx = {
 	bot: {} as unknown,
 	config: { registerPluginSchema: () => {} } as unknown,
-	db: {} as unknown,
+	scopeStore: {} as unknown,
 	query: (() => {}) as unknown,
 	sessions: {} as unknown,
 } as PluginContext;

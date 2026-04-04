@@ -7,14 +7,6 @@ import type { BotContext, Plugin, PluginContext } from "./plugin-api.ts";
 
 const log = getLogger(["bot", "plugin-loader"]);
 
-/**
- * Evict all plugin files from Bun's module cache.
- *
- * Bun ignores query-string cache busters on file:// URLs,
- * so we clear require.cache entries for the entire plugins directory
- * before re-importing. This covers single-file plugins, directory
- * plugins, and their nested dependencies.
- */
 function evictPluginCache(pluginsDir: string): void {
 	const absolute = resolve(pluginsDir);
 	let evicted = 0;
@@ -50,14 +42,17 @@ function discoverPluginPaths(pluginsDir: string): string[] {
 export interface LoadedPlugins {
 	plugins: Plugin[];
 	errors: Array<{ path: string; error: string }>;
-	resolveTarget: Plugin["resolveTarget"] | null;
-	approvalHandlers: Array<{
+	contextResolvers: Array<{
 		priority: number;
-		handler: NonNullable<Plugin["approvalHandler"]>;
+		resolver: NonNullable<Plugin["resolveContext"]>;
 	}>;
 	authChecks: Array<{
 		plugin: Plugin;
 		check: NonNullable<Plugin["authCheck"]>;
+	}>;
+	beforeQueryHooks: Array<{
+		priority: number;
+		handler: NonNullable<Plugin["beforeQuery"]>;
 	}>;
 	afterQueryHooks: Array<{
 		priority: number;
@@ -87,9 +82,9 @@ export async function loadPlugins(
 	const result: LoadedPlugins = {
 		plugins: [],
 		errors: [],
-		resolveTarget: null,
-		approvalHandlers: [],
+		contextResolvers: [],
 		authChecks: [],
+		beforeQueryHooks: [],
 		afterQueryHooks: [],
 		renderMiddlewares: [],
 		tools: [],
@@ -130,9 +125,7 @@ export async function loadPlugins(
 				config.registerPluginSchema(plugin.name, plugin.configSchema);
 			}
 
-			// Call register() with AbortSignal — plugin can check signal.aborted
-			// to bail out of long operations. We also race against a timeout so
-			// a plugin that ignores the signal can't hang the loader.
+			// Call register() with AbortSignal
 			if (plugin.register) {
 				const signal = AbortSignal.timeout(5000);
 				const timeout = new Promise<"timeout">((resolve) => {
@@ -152,23 +145,11 @@ export async function loadPlugins(
 				}
 			}
 
-			// Collect exclusive hooks
-			if (plugin.resolveTarget) {
-				if (result.resolveTarget) {
-					log.warn(
-						"Plugin {plugin} skipped: resolveTarget already registered",
-						{ plugin: plugin.name },
-					);
-					continue;
-				}
-				result.resolveTarget = plugin.resolveTarget;
-			}
-
-			// Chain hooks
-			if (plugin.approvalHandler) {
-				result.approvalHandlers.push({
+			// Collect resolveContext hooks (chain, first non-null wins)
+			if (plugin.resolveContext) {
+				result.contextResolvers.push({
 					priority: plugin.priority ?? 50,
-					handler: plugin.approvalHandler,
+					resolver: plugin.resolveContext,
 				});
 			}
 
@@ -176,7 +157,13 @@ export async function loadPlugins(
 				result.authChecks.push({ plugin, check: plugin.authCheck });
 			}
 
-			// Collect afterQuery hooks
+			if (plugin.beforeQuery) {
+				result.beforeQueryHooks.push({
+					priority: plugin.priority ?? 50,
+					handler: plugin.beforeQuery,
+				});
+			}
+
 			if (plugin.afterQuery) {
 				result.afterQueryHooks.push({
 					priority: plugin.priority ?? 50,
@@ -184,19 +171,6 @@ export async function loadPlugins(
 				});
 			}
 
-			// Collect render middlewares (+ auto-wrap deprecated responseRenderer)
-			if (plugin.responseRenderer && !plugin.renderMiddleware) {
-				log.warn(
-					"Plugin {plugin}: responseRenderer is deprecated, use renderMiddleware",
-					{ plugin: plugin.name },
-				);
-				const renderer = plugin.responseRenderer;
-				result.renderMiddlewares.push({
-					priority: plugin.priority ?? 50,
-					handler: (events, target, bot, _next) =>
-						renderer(events, target, bot),
-				});
-			}
 			if (plugin.renderMiddleware) {
 				result.renderMiddlewares.push({
 					priority: plugin.priority ?? 50,
@@ -204,14 +178,12 @@ export async function loadPlugins(
 				});
 			}
 
-			// Collect tools
 			if (plugin.tools) {
 				for (const tool of plugin.tools) {
 					result.tools.push({ plugin: plugin.name, tool });
 				}
 			}
 
-			// Collect commands
 			if (plugin.commands) {
 				for (const [name, def] of Object.entries(plugin.commands)) {
 					const handler = typeof def === "function" ? def : def.handler;
@@ -241,7 +213,8 @@ export async function loadPlugins(
 	}
 
 	// Sort by priority
-	result.approvalHandlers.sort((a, b) => a.priority - b.priority);
+	result.contextResolvers.sort((a, b) => a.priority - b.priority);
+	result.beforeQueryHooks.sort((a, b) => a.priority - b.priority);
 	result.afterQueryHooks.sort((a, b) => a.priority - b.priority);
 	result.renderMiddlewares.sort((a, b) => a.priority - b.priority);
 
@@ -258,9 +231,6 @@ export async function loadPlugins(
 export function buildMiddleware(loaded: LoadedPlugins): Composer<BotContext> {
 	const composer = new Composer<BotContext>();
 
-	// Register plugin middleware — errors propagate naturally.
-	// Plugins must handle their own errors (swallowing + calling next()
-	// is dangerous: auth middleware that throws = error swallowed = access granted).
 	for (const plugin of loaded.plugins) {
 		if (plugin.middleware) {
 			for (const mw of plugin.middleware) {
@@ -269,7 +239,6 @@ export function buildMiddleware(loaded: LoadedPlugins): Composer<BotContext> {
 		}
 	}
 
-	// Register commands from plugins
 	for (const [name, { plugin, handler }] of loaded.commands) {
 		composer.command(name, async (ctx) => {
 			try {
@@ -284,7 +253,6 @@ export function buildMiddleware(loaded: LoadedPlugins): Composer<BotContext> {
 		});
 	}
 
-	// Register handlers (grammy filter queries)
 	for (const plugin of loaded.plugins) {
 		if (plugin.handlers) {
 			for (const [filterQuery, handler] of Object.entries(plugin.handlers)) {

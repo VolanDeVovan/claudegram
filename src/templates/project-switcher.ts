@@ -8,7 +8,6 @@
  *   If the user has only "self" project, suggest adding a project first.
  */
 import { definePlugin } from "@core/plugin-api.ts";
-import type { SessionManager } from "@core/session-manager.ts";
 import { InlineKeyboard } from "grammy";
 
 const PREFIX = "proj:";
@@ -31,14 +30,21 @@ export default definePlugin({
 	description: "Switch between projects via inline keyboard (/project)",
 	priority: 30,
 
+	async resolveContext(ctx, pluginCtx) {
+		const project = await pluginCtx.scopeStore.get<string>(
+			ctx.userId,
+			"active_project",
+		);
+		if (!project) return null;
+		return { scope: ctx.userId, project };
+	},
+
 	middleware: [
 		async (ctx, next) => {
 			const data = ctx.callbackQuery?.data;
 			if (!data?.startsWith(PREFIX)) return next();
 
 			const projectName = data.slice(PREFIX.length);
-			const userId = String(ctx.from?.id);
-			const sessions = ctx.pluginContext.sessions as SessionManager;
 			const config = ctx.pluginContext.config;
 			const projects = config.data.projects;
 
@@ -51,7 +57,11 @@ export default definePlugin({
 				return;
 			}
 
-			sessions.setActiveProject(userId, target.name);
+			await ctx.pluginContext.scopeStore.set(
+				ctx.userId,
+				"active_project",
+				target.name,
+			);
 
 			const kb = buildKeyboard(projects, target.name);
 			await ctx.editMessageText("Select project:", { reply_markup: kb });
@@ -65,8 +75,6 @@ export default definePlugin({
 		project: {
 			description: "Switch project or list available projects",
 			handler: async (ctx) => {
-				const userId = String(ctx.from?.id);
-				const sessions = ctx.pluginContext.sessions as SessionManager;
 				const config = ctx.pluginContext.config;
 				const projects = config.data.projects;
 				const arg = (ctx.match as string)?.trim();
@@ -76,7 +84,11 @@ export default definePlugin({
 						await ctx.reply("No projects configured.");
 						return;
 					}
-					const activeProject = sessions.getActiveProject(userId);
+					const activeProject =
+						(await ctx.pluginContext.scopeStore.get<string>(
+							ctx.userId,
+							"active_project",
+						)) ?? "self";
 					const kb = buildKeyboard(projects, activeProject);
 					await ctx.reply("Select project:", { reply_markup: kb });
 					return;
@@ -93,7 +105,11 @@ export default definePlugin({
 					return;
 				}
 
-				sessions.setActiveProject(userId, target.name);
+				await ctx.pluginContext.scopeStore.set(
+					ctx.userId,
+					"active_project",
+					target.name,
+				);
 				await ctx.reply(`Switched to project "${target.name}".`);
 			},
 		},

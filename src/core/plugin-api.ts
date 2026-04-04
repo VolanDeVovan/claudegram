@@ -1,29 +1,38 @@
-import type { Database } from "bun:sqlite";
 import type { Bot, Context, MiddlewareFn } from "grammy";
 import type { ZodType, z } from "zod";
 import type { ConfigManager } from "./config.ts";
 import type { MessageChannel } from "./message-channel.ts";
+import type { ScopeStore } from "./scope-store.ts";
 
 // ─── Response Target ────────────────────────────────────────────
 
 export interface ResponseTarget {
 	chatId: number;
 	messageThreadId?: number;
+	scope: string;
+	project: string;
 }
 
 // ─── Query Events (streaming from Claude) ───────────────────────
 
+/**
+ * Streaming events from Claude SDK query.
+ *
+ * `callId` links tool_start and tool_end — use a Map<callId, input> in
+ * renderMiddleware to associate tool output with its input.
+ */
 export type QueryEvent =
 	| { type: "text_delta"; delta: string }
 	| { type: "thinking_delta"; delta: string }
-	| { type: "tool_start"; tool: string; input: unknown }
-	| { type: "tool_end"; tool: string; output: string }
+	| { type: "tool_start"; callId: string; tool: string; input: unknown }
+	| { type: "tool_end"; callId: string; tool: string; output: string }
 	| { type: "done"; finalText: string; turns: number };
 
 // ─── Sessions ───────────────────────────────────────────────────
 
 export interface SessionInfo {
 	id: string;
+	scope: string;
 	projectName: string;
 	createdAt: string;
 	lastUsed: string;
@@ -32,11 +41,16 @@ export interface SessionInfo {
 	isActive: boolean;
 }
 
+/**
+ * Public session operations available to plugins.
+ *
+ * All methods are scope-aware — pass `ctx.scope` (not `ctx.userId`) to match
+ * sessions created under the current routing context.
+ */
 export interface SessionAPI {
-	list(userId: string, projectName?: string): SessionInfo[];
-	activate(sessionId: string): void;
-	getActive(userId: string, projectName: string): SessionInfo | null;
-	getActiveProject(userId: string): string;
+	list(scope: string, projectName?: string): Promise<SessionInfo[]>;
+	activate(sessionId: string): Promise<void>;
+	getActive(scope: string, projectName: string): Promise<SessionInfo | null>;
 }
 
 // ─── Query Result (returned by handleMessage, passed to afterQuery) ─
@@ -46,6 +60,9 @@ export interface QueryResult {
 	turns: number;
 	project: string;
 	error?: Error;
+	costUsd: number;
+	durationMs: number;
+	toolCalls: Array<{ tool: string; durationMs: number }>;
 }
 
 // ─── Query Options ──────────────────────────────────────────────
@@ -53,6 +70,7 @@ export interface QueryResult {
 export interface QueryOpts {
 	message: string;
 	userId: string;
+	scope: string;
 	project: string;
 	signal?: AbortSignal;
 	/** Streaming prompt channel — if provided, used as AsyncIterable prompt for the SDK. */
@@ -62,18 +80,49 @@ export interface QueryOpts {
 // ─── Plugin Context ─────────────────────────────────────────────
 
 export interface PluginContext {
+	/**
+	 * Grammy bot instance. Provides direct access to Telegram Bot API.
+	 *
+	 * Use for per-chat command menus:
+	 * ```typescript
+	 * // Show only these commands in a specific chat
+	 * bot.api.setMyCommands(commands, {
+	 *   scope: { type: "chat", chat_id: chatId }
+	 * });
+	 *
+	 * // Different commands for all group chats
+	 * bot.api.setMyCommands(commands, {
+	 *   scope: { type: "all_group_chats" }
+	 * });
+	 * ```
+	 *
+	 * Telegram applies scopes by priority:
+	 * chat_member > chat > all_group_chats > all_private_chats > default
+	 */
 	bot: Bot<BotContext>;
+	/** Plugin config lives under `plugins.{name}.*` namespace. `set()` auto-snapshots before mutation. */
 	config: ConfigManager;
-	db: Database;
+	/**
+	 * Per-scope key-value storage.
+	 *
+	 * Three storage patterns — pick the right one:
+	 * - Per-user state → scopeStore (active_project, preferences, tokens)
+	 * - Global settings → config.get("plugins.myPlugin.setting")
+	 * - Ephemeral runtime → variable in plugin closure (dies on reload)
+	 */
+	scopeStore: ScopeStore;
 	query: (opts: QueryOpts) => AsyncIterable<QueryEvent>;
 	sessions: SessionAPI;
 }
 
-/** Сервисы + per-request данные. Получаешь в tool handler при каждом вызове. */
 export interface ToolContext extends PluginContext {
 	userId: string;
+	scope: string;
 	project: string;
 	cwd: string;
+	/** Fires when query is cancelled (/cancel). Check `signal.aborted` in long-running handlers. */
+	signal: AbortSignal;
+	/** Undefined in nested queries (no chat context). */
 	chatId?: number;
 	messageThreadId?: number;
 }
@@ -82,8 +131,17 @@ export interface ToolContext extends PluginContext {
 
 export interface BotContext extends Context {
 	pluginContext: PluginContext;
+
+	/** Set by scope-resolution middleware. Available in all handlers/commands/hooks. */
+	userId: string;
+	scope: string;
+	project: string;
+
 	/** Set by plugins to override the text sent to Claude. Executor reads this ?? ctx.message.text. */
 	overrideText?: string;
+
+	/** Set by resolveContext hook when it returns a target. */
+	resolvedTarget?: ResponseTarget;
 }
 
 // ─── Tools (MCP) ────────────────────────────────────────────────
@@ -105,57 +163,74 @@ export interface CommandDefinition {
 	handler: CommandHandler;
 }
 
-// ─── Approval ───────────────────────────────────────────────────
-
-export interface ApprovalRequest {
-	tool: string;
-	input: unknown;
-	description: string;
-	chatId: number;
-	bot: Bot<BotContext>;
-}
-
 // ─── Plugin ─────────────────────────────────────────────────────
 
 export interface Plugin {
 	name: string;
 	description?: string;
+	/** Lower = earlier. Default: 50. Routing plugins use 20-30. */
 	priority?: number;
 	configSchema?: ZodType;
 
 	// registration
 	middleware?: MiddlewareFn<BotContext>[];
 	commands?: Record<string, CommandHandler | CommandDefinition>;
+	/** Keys are grammy filter queries, e.g. `"message:photo"`. See: https://grammy.dev/guide/filter-queries */
 	handlers?: Record<string, (ctx: BotContext) => void | Promise<void>>;
 	tools?: ToolDefinition[];
 
 	// hooks
-	afterQuery?: (result: QueryResult, ctx: BotContext) => void | Promise<void>;
+
+	/** Determine scope + project + optional response target. Chain: first non-null wins. */
+	resolveContext?: (
+		ctx: BotContext,
+		pluginCtx: PluginContext,
+	) =>
+		| { scope: string; project: string; target?: ResponseTarget }
+		| null
+		| Promise<{
+				scope: string;
+				project: string;
+				target?: ResponseTarget;
+		  } | null>;
+
+	/** Gate access. Any returning true = allowed. */
 	authCheck?: (
 		userId: string,
 		pluginConfig: unknown,
 		ctx: BotContext,
 	) => boolean;
-	resolveTarget?: (
-		userId: string,
-		project: string,
-		ctx: BotContext,
-	) => ResponseTarget;
-	/** @deprecated Use renderMiddleware instead */
-	responseRenderer?: (
-		events: AsyncIterable<QueryEvent>,
-		target: ResponseTarget,
-		bot: Bot<BotContext>,
-	) => Promise<void>;
+
+	/** Called before agent query starts. Throw to abort (e.g. rate limiting). */
+	beforeQuery?: (opts: QueryOpts, ctx: BotContext) => void | Promise<void>;
+
+	afterQuery?: (result: QueryResult, ctx: BotContext) => void | Promise<void>;
+
+	/**
+	 * Customize response rendering. Works like Express middleware — call `next(events)`
+	 * to pass through, or consume events yourself to replace rendering entirely.
+	 *
+	 * ```typescript
+	 * async renderMiddleware(events, target, bot, next) {
+	 *   // Transform: wrap events in your own async generator
+	 *   async function* filtered() {
+	 *     for await (const e of events) {
+	 *       if (e.type !== "thinking_delta") yield e;
+	 *     }
+	 *   }
+	 *   await next(filtered());
+	 * }
+	 * ```
+	 */
 	renderMiddleware?: (
 		events: AsyncIterable<QueryEvent>,
 		target: ResponseTarget,
 		bot: Bot<BotContext>,
 		next: (events: AsyncIterable<QueryEvent>) => Promise<void>,
 	) => Promise<void>;
-	approvalHandler?: (request: ApprovalRequest) => Promise<boolean>;
 
 	// lifecycle
+	/** Called on plugin load. signal fires after 5s timeout if register() hangs. */
 	register?(ctx: PluginContext, signal: AbortSignal): void | Promise<void>;
 	dispose?(): void | Promise<void>;
 }

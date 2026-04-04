@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type {
@@ -26,6 +26,7 @@ import type {
 } from "./plugin-api.ts";
 import type { LoadedPlugins } from "./plugin-loader.ts";
 import { defaultRenderer } from "./response-renderer.ts";
+import type { ScopeStore } from "./scope-store.ts";
 import type { SessionManager } from "./session-manager.ts";
 
 const log = getLogger(["bot", "executor"]);
@@ -80,7 +81,7 @@ export class Executor {
 	private config: ConfigManager;
 	private sessionManager: SessionManager;
 	private bot: Bot<BotContext>;
-	private db: Database;
+	private scopeStore: ScopeStore;
 	private botRoot: string;
 	private pluginsDir: string;
 	private coreTools: CoreToolDef[];
@@ -91,7 +92,7 @@ export class Executor {
 		config: ConfigManager;
 		sessionManager: SessionManager;
 		bot: Bot<BotContext>;
-		db: Database;
+		scopeStore: ScopeStore;
 		botRoot: string;
 		pluginsDir: string;
 		coreTools: CoreToolDef[];
@@ -100,7 +101,7 @@ export class Executor {
 		this.config = opts.config;
 		this.sessionManager = opts.sessionManager;
 		this.bot = opts.bot;
-		this.db = opts.db;
+		this.scopeStore = opts.scopeStore;
 		this.botRoot = opts.botRoot;
 		this.pluginsDir = opts.pluginsDir;
 		this.coreTools = opts.coreTools;
@@ -125,15 +126,21 @@ export class Executor {
 		const toolCtx: ToolContext = {
 			bot: this.bot,
 			config: this.config,
-			db: this.db,
+			scopeStore: this.scopeStore,
 			query: this.createQueryFn(),
 			sessions: this.sessionManager,
 			userId: opts.userId,
+			scope: opts.scope,
 			project,
 			cwd,
+			signal: opts.signal ?? new AbortController().signal,
 			chatId: target?.chatId,
 			messageThreadId: target?.messageThreadId,
 		};
+
+		// Track tool calls for QueryResult
+		const toolCallTimers = new Map<string, number>();
+		const toolCallResults: Array<{ tool: string; durationMs: number }> = [];
 
 		// Build MCP server for tools (core + plugin)
 		const allTools: SdkMcpToolDefinition[] = [];
@@ -268,8 +275,8 @@ export class Executor {
 		}
 
 		// Session resume
-		const sessionId = this.sessionManager.getActiveSessionId(
-			opts.userId,
+		const sessionId = await this.sessionManager.getActiveSessionId(
+			opts.scope,
 			project,
 		);
 		if (sessionId) {
@@ -289,7 +296,7 @@ export class Executor {
 			},
 		);
 
-		const stopWatchdog = startWatchdog(opts.userId, project);
+		const stopWatchdog = startWatchdog(opts.scope, project);
 		const startTime = Date.now();
 		let totalText = "";
 		let resultSessionId: string | undefined;
@@ -304,10 +311,8 @@ export class Executor {
 				const msg = message as SDKMessage;
 
 				if (msg.type === "assistant") {
-					// Extract text from assistant message content blocks
 					for (const block of msg.message.content) {
 						if (block.type === "text") {
-							// Separate text from different assistant turns
 							const sep = hadTextOutput && block.text.length > 0 ? "\n\n" : "";
 							yield { type: "text_delta", delta: sep + block.text };
 							totalText += sep + block.text;
@@ -318,14 +323,55 @@ export class Executor {
 								delta: (block as Record<string, string>).thinking ?? "",
 							};
 						} else if (block.type === "tool_use") {
+							const callId =
+								(block as Record<string, string>).id ?? randomUUID();
+							toolCallTimers.set(callId, Date.now());
 							yield {
 								type: "tool_start",
+								callId,
 								tool: block.name,
 								input: block.input,
 							};
 						}
 					}
 					resultSessionId = msg.session_id;
+				} else if (msg.type === "tool") {
+					// Tool results — emit tool_end events
+					const toolMsg = msg as Record<string, unknown>;
+					const content = toolMsg.content as
+						| Array<Record<string, string>>
+						| undefined;
+					let matched = false;
+					if (content) {
+						for (const block of content) {
+							if (block.type === "tool_result") {
+								matched = true;
+								const callId = block.tool_use_id ?? "";
+								const startMs = toolCallTimers.get(callId);
+								const durationMs = startMs ? Date.now() - startMs : 0;
+								toolCallTimers.delete(callId);
+								toolCallResults.push({
+									tool: block.tool_name ?? "unknown",
+									durationMs,
+								});
+								yield {
+									type: "tool_end",
+									callId,
+									tool: block.tool_name ?? "unknown",
+									output: block.text ?? "",
+								};
+							}
+						}
+					}
+					if (!matched) {
+						log.warn(
+							"Tool message without tool_result blocks — SDK format may have changed",
+							{
+								type: msg.type,
+								keys: content ? content.map((b) => b.type) : "no content",
+							},
+						);
+					}
 				} else if (msg.type === "result") {
 					resultSessionId = msg.session_id;
 					if (msg.subtype === "success") {
@@ -379,11 +425,10 @@ export class Executor {
 					sessionId,
 					error: e instanceof Error ? e.message : String(e),
 				});
-				this.sessionManager.deactivateSession(sessionId);
+				await this.sessionManager.deactivateSession(sessionId);
 				delete sdkOptions.resume;
 
 				try {
-					// Channel may be consumed — fall back to string for retry
 					const retryPrompt = opts.message;
 					const q = sdkQuery({ prompt: retryPrompt, options: sdkOptions });
 					for await (const message of q) {
@@ -429,22 +474,30 @@ export class Executor {
 
 		// Persist session
 		if (resultSessionId) {
-			const existingSession = this.sessionManager.getActiveSessionId(
-				opts.userId,
+			const existingSession = await this.sessionManager.getActiveSessionId(
+				opts.scope,
 				project,
 			);
 			if (existingSession === resultSessionId) {
-				this.sessionManager.updateSession(resultSessionId, turns, costUsd);
+				await this.sessionManager.updateSession(
+					resultSessionId,
+					turns,
+					costUsd,
+				);
 			} else {
 				if (existingSession) {
-					this.sessionManager.deactivateSession(existingSession);
+					await this.sessionManager.deactivateSession(existingSession);
 				}
-				this.sessionManager.createSession(
+				await this.sessionManager.createSession(
 					resultSessionId,
-					opts.userId,
+					opts.scope,
 					project,
 				);
-				this.sessionManager.updateSession(resultSessionId, turns, costUsd);
+				await this.sessionManager.updateSession(
+					resultSessionId,
+					turns,
+					costUsd,
+				);
 			}
 		}
 
@@ -467,6 +520,7 @@ export class Executor {
 		target: ResponseTarget,
 	): Promise<QueryResult> {
 		const loaded = this.getLoadedPlugins();
+		const startTime = Date.now();
 
 		// Typing indicator heartbeat
 		const sendOpts = target.messageThreadId
@@ -482,16 +536,36 @@ export class Executor {
 			finalText: "",
 			turns: 0,
 			project: opts.project,
+			costUsd: 0,
+			durationMs: 0,
+			toolCalls: [],
 		};
 
 		try {
 			// Wrap events to capture QueryResult from the done event
 			const rawEvents = this.executeQuery(opts, target);
+			const toolCalls: Array<{ tool: string; durationMs: number }> = [];
+			const toolTimers = new Map<string, { tool: string; start: number }>();
+
 			async function* captureResult(
 				source: AsyncIterable<QueryEvent>,
 			): AsyncIterable<QueryEvent> {
 				for await (const event of source) {
-					if (event.type === "done") {
+					if (event.type === "tool_start") {
+						toolTimers.set(event.callId, {
+							tool: event.tool,
+							start: Date.now(),
+						});
+					} else if (event.type === "tool_end") {
+						const timer = toolTimers.get(event.callId);
+						if (timer) {
+							toolCalls.push({
+								tool: timer.tool,
+								durationMs: Date.now() - timer.start,
+							});
+							toolTimers.delete(event.callId);
+						}
+					} else if (event.type === "done") {
 						result.finalText = event.finalText;
 						result.turns = event.turns;
 					}
@@ -514,10 +588,13 @@ export class Executor {
 					mw.handler(events, target, bot, (e) => next(e, target, bot));
 			}
 			await render(events, target, this.bot);
+
+			result.toolCalls = toolCalls;
 		} catch (e) {
 			result.error = e instanceof Error ? e : new Error(String(e));
 		} finally {
 			clearInterval(typingInterval);
+			result.durationMs = Date.now() - startTime;
 		}
 
 		return result;
