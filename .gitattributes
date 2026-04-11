@@ -1,0 +1,2 @@
+bun.lock merge=theirs
+plugins/package.json merge=ours

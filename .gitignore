@@ -36,4 +36,5 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Runtime data (mutable)
 data/
 plugins/
+!plugins/package.json
 .uploads
