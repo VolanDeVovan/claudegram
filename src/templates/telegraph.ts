@@ -1,25 +1,17 @@
 /**
- * @plugin telegraph-renderer
- * @description Publishes long responses (>2500 chars) to Telegraph Instant View.
+ * @plugin telegraph
+ * @description Adds a tool for publishing markdown content to Telegraph Instant View.
+ *   The model decides when to use Telegraph (long responses, rich formatting, etc.).
  *   Uses Telegraph API createAccount (auto, no manual token needed).
  *   Account persisted in data/telegraph-account.json.
- *   Short responses pass through to the default renderer via next().
- * @priority 50
- * @config plugins.telegraph-renderer.threshold — char limit before switching to Telegraph (default: 2500)
  * @prerequisites Bot must have internet access to reach api.telegra.ph.
- * @postInstall Long responses (>2500 chars) will now be published as Telegraph pages
- *   with Instant View. Threshold is configurable. Telegraph account is created
- *   automatically on first use, no API keys needed.
+ * @postInstall The model now has a `publish_telegraph` tool to create Telegraph
+ *   Instant View pages from markdown. It will use it for long or richly
+ *   formatted responses. Telegraph account is created automatically on first use.
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-	type BotContext,
-	definePlugin,
-	type QueryEvent,
-	type ResponseTarget,
-} from "@core/plugin-api.ts";
-import type { Bot } from "grammy";
+import { definePlugin } from "@core/plugin-api.ts";
 import { z } from "zod";
 
 const TELEGRAPH_API = "https://api.telegra.ph";
@@ -30,7 +22,7 @@ interface TelegraphAccount {
 	short_name: string;
 }
 
-async function getOrCreateAccount(): Promise<TelegraphAccount> {
+export async function getOrCreateAccount(): Promise<TelegraphAccount> {
 	if (existsSync(ACCOUNT_FILE)) {
 		return JSON.parse(readFileSync(ACCOUNT_FILE, "utf-8"));
 	}
@@ -47,12 +39,36 @@ async function getOrCreateAccount(): Promise<TelegraphAccount> {
 	return data.result;
 }
 
-type TNode =
+export type TNode =
 	| string
 	| { tag: string; attrs?: Record<string, string>; children?: TNode[] };
 
-/** Parse inline markdown: bold+italic, bold, italic, strikethrough, code, links */
-function parseInline(text: string): TNode[] {
+/**
+ * Known video/embed platforms — converted to Telegraph /embed/ iframe format.
+ * Note: only the /embed/{platform}?url=... format works (not direct embed URLs).
+ */
+const EMBED_PATTERNS: Record<string, RegExp> = {
+	youtube:
+		/^.*(?:(?:youtu\.be\/|v\/|vi\/|u\/\w\/|embed\/)|(?:(?:watch)?\?v(?:i)?=|&v(?:i)?=))([^#&?]+).*/,
+	twitter:
+		/(https?:\/\/)?(www\.)?(twitter\.com|x\.com)\/([a-zA-Z0-9_]*\/)*status\/(\d+)[?]?.*/,
+	telegram:
+		/^(https?):\/\/(t\.me|telegram\.me|telegram\.dog)\/([a-zA-Z0-9_]+)\/(\d+)/,
+	vimeo:
+		/(https?:\/\/)?(www\.)?(player\.)?vimeo\.com\/([a-z]*\/)*(\d{6,11})[?]?.*/,
+};
+
+function toEmbedUrl(url: string): string | null {
+	for (const site in EMBED_PATTERNS) {
+		if (EMBED_PATTERNS[site].test(url)) {
+			return `/embed/${site}?url=${encodeURIComponent(url)}`;
+		}
+	}
+	return null;
+}
+
+/** Parse inline markdown: bold+italic, bold, italic, strikethrough, code, links, images */
+export function parseInline(text: string): TNode[] {
 	const nodes: TNode[] = [];
 	let remaining = text;
 
@@ -60,43 +76,65 @@ function parseInline(text: string): TNode[] {
 		regex: RegExp;
 		handler: (m: RegExpMatchArray) => TNode;
 	}> = [
-		// Links: [text](url)
+		// Images: ![alt](url)
+		{
+			regex: /!\[([^\]]*)\]\(([^)]+)\)/,
+			handler: (m) => {
+				const children: TNode[] = [{ tag: "img", attrs: { src: m[2] } }];
+				if (m[1]) children.push({ tag: "figcaption", children: [m[1]] });
+				return { tag: "figure", children };
+			},
+		},
+		// Links: [text](url) — with embed detection
 		{
 			regex: /\[([^\]]+)\]\(([^)]+)\)/,
-			handler: (m) => ({ tag: "a", attrs: { href: m[2] }, children: [m[1]] }),
+			handler: (m) => {
+				const embedUrl = toEmbedUrl(m[2]);
+				if (embedUrl) {
+					return {
+						tag: "figure",
+						children: [{ tag: "iframe", attrs: { src: embedUrl } }],
+					};
+				}
+				return {
+					tag: "a",
+					attrs: { href: m[2] },
+					children: parseInline(m[1]),
+				};
+			},
 		},
 		// Bold + Italic: ***text***
 		{
 			regex: /\*\*\*(.+?)\*\*\*/,
 			handler: (m) => ({
 				tag: "strong",
-				children: [{ tag: "em", children: [m[1]] }],
+				children: [{ tag: "em", children: parseInline(m[1]) }],
 			}),
 		},
 		// Bold: **text** or __text__
 		{
 			regex: /\*\*(.+?)\*\*/,
-			handler: (m) => ({ tag: "strong", children: [m[1]] }),
+			handler: (m) => ({ tag: "strong", children: parseInline(m[1]) }),
 		},
 		{
 			regex: /__(.+?)__/,
-			handler: (m) => ({ tag: "strong", children: [m[1]] }),
+			handler: (m) => ({ tag: "strong", children: parseInline(m[1]) }),
 		},
 		// Italic: *text* or _text_ (not inside words for _)
 		{
 			regex: /\*(.+?)\*/,
-			handler: (m) => ({ tag: "em", children: [m[1]] }),
+			handler: (m) => ({ tag: "em", children: parseInline(m[1]) }),
 		},
 		{
 			regex: /(?<!\w)_(.+?)_(?!\w)/,
-			handler: (m) => ({ tag: "em", children: [m[1]] }),
+			handler: (m) => ({ tag: "em", children: parseInline(m[1]) }),
 		},
 		// Strikethrough: ~~text~~
 		{
 			regex: /~~(.+?)~~/,
-			handler: (m) => ({ tag: "s", children: [m[1]] }),
+			handler: (m) => ({ tag: "s", children: parseInline(m[1]) }),
 		},
-		// Inline code: `code`
+		// Inline code: `code` — no recursion, content is literal
 		{
 			regex: /`([^`]+)`/,
 			handler: (m) => ({ tag: "code", children: [m[1]] }),
@@ -139,7 +177,7 @@ function parseInline(text: string): TNode[] {
 }
 
 /** Parse markdown text into Telegraph-compatible node tree */
-function textToNodes(text: string): TNode[] {
+export function textToNodes(text: string): TNode[] {
 	const nodes: TNode[] = [];
 	const lines = text.split("\n");
 	let inCodeBlock = false;
@@ -210,7 +248,17 @@ function textToNodes(text: string): TNode[] {
 			continue;
 		}
 
-		// Headers
+		// Headers (h5/h6 mapped to h4, h1/h2 mapped to h3 — Telegraph only supports h3/h4)
+		if (line.startsWith("###### ")) {
+			flushAll();
+			nodes.push({ tag: "h4", children: parseInline(line.slice(7)) });
+			continue;
+		}
+		if (line.startsWith("##### ")) {
+			flushAll();
+			nodes.push({ tag: "h4", children: parseInline(line.slice(6)) });
+			continue;
+		}
 		if (line.startsWith("#### ")) {
 			flushAll();
 			nodes.push({ tag: "h4", children: parseInline(line.slice(5)) });
@@ -254,6 +302,30 @@ function textToNodes(text: string): TNode[] {
 			}
 			listItems.push({ tag: "li", children: parseInline(orderedMatch[2]) });
 			continue;
+		}
+
+		// Bare embed URL on its own line (YouTube, Twitter, Telegram, Vimeo)
+		const bareUrlMatch = line.match(/^\s*(https?:\/\/[^\s]+)\s*$/);
+		if (bareUrlMatch) {
+			const url = bareUrlMatch[1];
+			const embedUrl = toEmbedUrl(url);
+			if (embedUrl) {
+				flushAll();
+				nodes.push({
+					tag: "figure",
+					children: [{ tag: "iframe", attrs: { src: embedUrl } }],
+				});
+				continue;
+			}
+			// Bare image URL
+			if (/\.(jpg|jpeg|png|gif|webp|svg)(\?[^\s]*)?$/i.test(url)) {
+				flushAll();
+				nodes.push({
+					tag: "figure",
+					children: [{ tag: "img", attrs: { src: url } }],
+				});
+				continue;
+			}
 		}
 
 		// Blockquote
@@ -336,7 +408,7 @@ function textToNodes(text: string): TNode[] {
 	return nodes;
 }
 
-async function createPage(
+export async function createPage(
 	account: TelegraphAccount,
 	title: string,
 	text: string,
@@ -357,46 +429,34 @@ async function createPage(
 }
 
 export default definePlugin({
-	name: "telegraph-renderer",
-	description:
-		"Publishes long responses to Telegraph Instant View for better readability",
-	priority: 50,
+	name: "telegraph",
+	description: "Publishes content to Telegraph Instant View pages",
 
-	configSchema: z.object({
-		threshold: z.number().default(2500),
-	}),
+	configSchema: z.object({}),
 
-	renderMiddleware: async (
-		events: AsyncIterable<QueryEvent>,
-		target: ResponseTarget,
-		bot: Bot<BotContext>,
-		next: (events: AsyncIterable<QueryEvent>) => Promise<void>,
-	) => {
-		const threshold = 2500;
-
-		// Collect all events — we need to know final length before deciding
-		const collected: QueryEvent[] = [];
-		let text = "";
-		for await (const event of events) {
-			collected.push(event);
-			if (event.type === "text_delta") text += event.delta;
-		}
-
-		if (text.length <= threshold) {
-			// Short response — delegate to default renderer
-			async function* replay() {
-				yield* collected;
-			}
-			await next(replay());
-			return;
-		}
-
-		// Long response — publish to Telegraph
-		const account = await getOrCreateAccount();
-		const page = await createPage(account, "Claude Response", text);
-		const sendOpts = target.messageThreadId
-			? { message_thread_id: target.messageThreadId }
-			: {};
-		await bot.api.sendMessage(target.chatId, page.url, sendOpts);
-	},
+	tools: [
+		{
+			name: "publish_telegraph",
+			description:
+				"Publish content as a Telegraph (telegra.ph) Instant View page and return the URL. " +
+				"Use for long or richly formatted responses that benefit from a clean web layout. " +
+				"Input is standard markdown with full support for: " +
+				"headings (# through ######), **bold**, *italic*, ~~strikethrough~~, " +
+				"`inline code`, ```fenced code blocks```, ordered/unordered lists, " +
+				"> blockquotes, horizontal rules (---), tables (|col|col|), " +
+				"images (![alt](url) or bare image URL on its own line), " +
+				"and links ([text](url)). " +
+				"Video URLs from YouTube, Vimeo, Twitter/X on their own line become embedded players.",
+			schema: z.object({
+				title: z.string().describe("Page title (1-256 chars)"),
+				markdown: z.string().describe("Markdown content for the page"),
+			}),
+			scope: "all",
+			handler: async (input: { title: string; markdown: string }) => {
+				const account = await getOrCreateAccount();
+				const page = await createPage(account, input.title, input.markdown);
+				return `Telegraph page created: ${page.url}`;
+			},
+		},
+	],
 });
