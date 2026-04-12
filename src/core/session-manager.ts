@@ -12,6 +12,7 @@ export class SessionManager implements SessionAPI {
 	private sessionLocks = new Map<string, Promise<void>>();
 	private activeControllers = new Map<string, AbortController>();
 	private activeChannels = new Map<string, MessageChannel>();
+	private pendingContext = new Map<string, string[]>();
 
 	constructor(sessionsPath: string, config: ConfigManager) {
 		this.store = new JsonStore(sessionsPath, []);
@@ -222,6 +223,22 @@ export class SessionManager implements SessionAPI {
 
 	removeActiveChannel(scope: string, project: string): void {
 		this.activeChannels.delete(this.lockKey(scope, project));
+	}
+
+	// ── Pending context (bot-sent messages for agent awareness) ──
+
+	pushContext(scope: string, project: string, text: string): void {
+		const key = this.lockKey(scope, project);
+		const existing = this.pendingContext.get(key) ?? [];
+		existing.push(text);
+		this.pendingContext.set(key, existing);
+	}
+
+	drainContext(scope: string, project: string): string[] {
+		const key = this.lockKey(scope, project);
+		const items = this.pendingContext.get(key) ?? [];
+		this.pendingContext.delete(key);
+		return items;
 	}
 
 	cancelQuery(scope: string, project: string): boolean {

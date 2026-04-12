@@ -233,6 +233,10 @@ async function main() {
 		scopeStore,
 		query: executor.createQueryFn(),
 		sessions: sessionManager,
+		notify: async (scope, project, text, context) => {
+			await bot.api.sendMessage(Number(scope), text);
+			sessionManager.pushContext(scope, project, context ?? text);
+		},
 	};
 
 	const coreCommandDescriptions: Record<string, string> = {
@@ -332,7 +336,7 @@ async function main() {
 
 	// ── Message routing (core) ──
 	bot.on("message", async (ctx) => {
-		const text =
+		let text =
 			ctx.overrideText ?? ctx.message?.text ?? ctx.message?.caption ?? "";
 		if (!text) return;
 
@@ -347,6 +351,12 @@ async function main() {
 				project,
 			});
 			return;
+		}
+
+		// Drain pending context (bot-sent messages the agent should know about)
+		const pending = sessionManager.drainContext(scope, project);
+		if (pending.length > 0) {
+			text = `${pending.join("\n\n---\n\n")}\n\n---\n\n${text}`;
 		}
 
 		// Resolve target

@@ -113,6 +113,33 @@ export interface PluginContext {
 	scopeStore: ScopeStore;
 	query: (opts: QueryOpts) => AsyncIterable<QueryEvent>;
 	sessions: SessionAPI;
+	/**
+	 * Send a message to the user's DM and register it as pending context for the agent.
+	 * On the next user message, the agent will see what the bot sent — enabling it to
+	 * understand replies like "fix this" or "explain".
+	 *
+	 * @param scope - User scope (used as chatId via Number(scope) for DM delivery)
+	 * @param project - Project context for the pending buffer
+	 * @param text - Message text sent to the user via Telegram
+	 * @param context - Optional custom context for the agent. If omitted, defaults to `text`.
+	 *   Use this to give the agent more detail than the user sees (e.g., full error logs).
+	 *
+	 * @example
+	 * // Simple — agent sees exactly what user sees
+	 * await ctx.notify(scope, project, "Build failed on commit abc1234");
+	 *
+	 * // Custom context — agent gets richer info
+	 * await ctx.notify(scope, project,
+	 *   "Build failed.",
+	 *   "[CI notification]\nBuild failed on commit abc1234.\nError: type mismatch in src/foo.ts:42"
+	 * );
+	 */
+	notify(
+		scope: string,
+		project: string,
+		text: string,
+		context?: string,
+	): Promise<void>;
 }
 
 export interface ToolContext extends PluginContext {
