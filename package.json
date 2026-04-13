@@ -7,7 +7,7 @@
 		"plugins"
 	],
 	"scripts": {
-		"start": "bun run src/core/server.ts"
+		"start": "bun run start.ts"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.9",

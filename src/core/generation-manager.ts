@@ -13,14 +13,32 @@ import { createTwoFilesPatch } from "diff";
 
 const log = getLogger(["bot", "generation"]);
 
-interface GenerationMeta {
+// Node's Dirent typings expose `parentPath`; Bun also populates `path` on older
+// Node versions. Read whichever is present.
+function direntParent(e: { parentPath?: string; path?: string }): string {
+	return e.parentPath ?? e.path ?? "";
+}
+
+export interface GenerationMeta {
 	generation: number;
 	timestamp: string;
 	description: string;
 	plugins: string[];
+	/** Git HEAD at snapshot time. Optional for legacy generations predating this field. */
+	commitHash?: string;
 }
 
 const MAX_GENERATIONS = 50;
+
+/**
+ * True iff `src` names or lives inside a `node_modules` directory. Used by
+ * the snapshot copy filter and the diff file walker. The obvious
+ * `includes("/node_modules")` would also match legitimate names like
+ * `docs/node_modules_guide.md` — hence the path-segment check.
+ */
+function isInNodeModules(src: string): boolean {
+	return src.endsWith("/node_modules") || src.includes("/node_modules/");
+}
 
 export class GenerationManager {
 	private generationsDir: string;
@@ -63,15 +81,36 @@ export class GenerationManager {
 			.map((e) => e.name.replace(/\.ts$/, ""));
 	}
 
-	create(description: string): number {
+	/**
+	 * Snapshot the current `plugins/` directory as a new generation.
+	 *
+	 * `commitHash` is the git HEAD at snapshot time; the caller provides it
+	 * (via `git.getHead()`) so this module stays git-agnostic and testable.
+	 * Omit it if git state isn't relevant (e.g. a plugin-only reload where the
+	 * rollback can reuse the current HEAD).
+	 */
+	create(description: string, commitHash?: string): number {
 		const current = this.getCurrent();
 		const next = current + 1;
 		const genDir = this.genPath(next);
 
+		// Wipe any stale directory at this index before copying. After a
+		// rollback the current pointer moves backwards but the higher-
+		// numbered directories stay on disk (so a later rollforward could
+		// reuse them). On the next create() we compute next = current+1
+		// and may land right on top of a leftover — without a wipe, cpSync
+		// would merge the new plugin files into whatever was there before,
+		// leaving the snapshot with a mix of old and new state.
+		if (existsSync(genDir)) {
+			rmSync(genDir, { recursive: true, force: true });
+		}
 		mkdirSync(join(genDir, "plugins"), { recursive: true });
 
 		if (existsSync(this.pluginsDir)) {
-			cpSync(this.pluginsDir, join(genDir, "plugins"), { recursive: true });
+			cpSync(this.pluginsDir, join(genDir, "plugins"), {
+				recursive: true,
+				filter: (src) => !isInNodeModules(src),
+			});
 		}
 
 		const meta: GenerationMeta = {
@@ -79,6 +118,7 @@ export class GenerationManager {
 			timestamp: new Date().toISOString(),
 			description,
 			plugins: this.getPluginNames(),
+			commitHash,
 		};
 		writeFileSync(join(genDir, "meta.json"), JSON.stringify(meta, null, 2));
 		writeFileSync(this.currentFile(), String(next));
@@ -90,6 +130,52 @@ export class GenerationManager {
 
 		this.rotate();
 		return next;
+	}
+
+	/**
+	 * Drop a generation that was created but never made it into a durable
+	 * state — typically a pre-update snapshot whose `/update` aborted early
+	 * (dirty tree, failed `git pull`, failed `bun install`). If this was the
+	 * current pointer, roll back to the previous highest numbered generation
+	 * so `getCurrent()` never reports a removed gen.
+	 *
+	 * Safe to call on a non-existent generation — no-op. Never call this on
+	 * an older generation: the rollback logic assumes generation numbers are
+	 * monotonic and dropping arbitrary ones from the middle would confuse it.
+	 */
+	discard(generation: number): void {
+		const genDir = this.genPath(generation);
+		if (!existsSync(genDir)) return;
+
+		rmSync(genDir, { recursive: true, force: true });
+
+		if (this.getCurrent() === generation) {
+			// Find the next-highest remaining generation and point at it.
+			const remaining = this.list();
+			const next = remaining[remaining.length - 1]?.generation ?? 0;
+			writeFileSync(this.currentFile(), String(next));
+		}
+
+		log.info("Generation {num} discarded", { num: generation });
+	}
+
+	/**
+	 * Read a single generation's metadata without touching `plugins/`.
+	 *
+	 * Callers (e.g. the rollback flow) need to inspect `commitHash` before
+	 * deciding whether to do a git reset — doing it via `rollback()` would
+	 * prematurely clobber the live plugins directory.
+	 */
+	getMeta(generation: number): GenerationMeta | null {
+		const genDir = this.genPath(generation);
+		if (!existsSync(genDir)) return null;
+		try {
+			return JSON.parse(
+				readFileSync(join(genDir, "meta.json"), "utf-8"),
+			) as GenerationMeta;
+		} catch {
+			return null;
+		}
 	}
 
 	list(): GenerationMeta[] {
@@ -113,19 +199,26 @@ export class GenerationManager {
 		});
 	}
 
+	/**
+	 * Restore `plugins/` to the given generation and bump the current pointer.
+	 *
+	 * Callers needing the recorded `commitHash` (to decide whether a process
+	 * restart is required) should call {@link getMeta} before invoking this —
+	 * it deliberately doesn't return the hash because the rollback flow
+	 * already reads metadata up-front to sequence git reset before the
+	 * plugin-file restore.
+	 */
 	rollback(generation: number): void {
 		const genDir = this.genPath(generation);
 		if (!existsSync(genDir)) {
 			throw new Error(`Generation ${generation} not found`);
 		}
 
-		// Clear current plugins
 		if (existsSync(this.pluginsDir)) {
 			rmSync(this.pluginsDir, { recursive: true });
 		}
 		mkdirSync(this.pluginsDir, { recursive: true });
 
-		// Copy from generation
 		const src = join(genDir, "plugins");
 		if (existsSync(src)) {
 			cpSync(src, this.pluginsDir, { recursive: true });
@@ -190,10 +283,12 @@ export class GenerationManager {
 	private listFiles(dir: string): string[] {
 		if (!dir || !existsSync(dir)) return [];
 		return readdirSync(dir, { recursive: true, withFileTypes: true })
-			.filter((e) => e.isFile())
+			.filter((e) => {
+				if (!e.isFile()) return false;
+				return !isInNodeModules(direntParent(e));
+			})
 			.map((e) => {
-				const parent = e.parentPath ?? e.path;
-				const rel = parent.slice(dir.length).replace(/^\//, "");
+				const rel = direntParent(e).slice(dir.length).replace(/^\//, "");
 				return rel ? `${rel}/${e.name}` : e.name;
 			});
 	}

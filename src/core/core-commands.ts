@@ -1,18 +1,32 @@
 import type { Bot } from "grammy";
 import type { ConfigManager } from "./config.ts";
-import type { GenerationManager } from "./generation-manager.ts";
 import type { BotContext } from "./plugin-api.ts";
 import type { SessionManager } from "./session-manager.ts";
+import { applyRollback, type BotRuntime } from "./update.ts";
+import type { NotifyTarget } from "./update-state.ts";
 
 const startedAt = Date.now();
+
+function targetFromContext(ctx: BotContext): NotifyTarget {
+	// Inside command/callback handlers grammy guarantees ctx.chat is set.
+	// Surface the invariant explicitly so a violation throws a clear error
+	// instead of targeting chat 0 and failing opaquely on sendMessage.
+	if (!ctx.chat) {
+		throw new Error("targetFromContext called without ctx.chat");
+	}
+	const target: NotifyTarget = { chatId: ctx.chat.id };
+	const threadId = ctx.msg?.message_thread_id;
+	if (threadId) target.messageThreadId = threadId;
+	return target;
+}
 
 export function registerCoreCommands(
 	bot: Bot<BotContext>,
 	sessionManager: SessionManager,
-	config: ConfigManager,
-	generationManager: GenerationManager,
 	reloadPlugins: () => Promise<{ loaded: string[]; errors: string[] }>,
+	runtime: BotRuntime,
 ): void {
+	const { generations } = runtime;
 	// Core commands registered AFTER auth middleware — no guarded() needed
 
 	bot.command("cancel", async (ctx) => {
@@ -34,22 +48,41 @@ export function registerCoreCommands(
 	});
 
 	bot.command("rollback", async (ctx) => {
-		const current = generationManager.getCurrent();
+		const current = generations.getCurrent();
 		if (current <= 1) {
 			await ctx.reply("No previous generation to rollback to.");
 			return;
 		}
 		const target = current - 1;
+		// Early feedback: applyRollback may take several seconds (bun install
+		// runs on both paths). On the cold-restart branch it never returns,
+		// so without this reply the user sees nothing until the post-restart
+		// startup notification arrives.
+		await ctx.reply(`Rolling back to generation ${target}…`).catch(() => {});
 		try {
-			generationManager.rollback(target);
-			const result = await reloadPlugins();
-			const plugins = result.loaded.join(", ") || "none";
-			await ctx.reply(
-				`Rolled back to generation ${target}. Plugins: ${plugins}`,
+			const result = await applyRollback(
+				runtime,
+				target,
+				ctx.scope,
+				ctx.project,
+				targetFromContext(ctx),
+				reloadPlugins,
+			);
+			// If a restart was needed, applyRollback never returns — control
+			// reaches this line only on the hot-reload path.
+			await ctx.reply(result.message);
+			sessionManager.pushContext(
+				ctx.scope,
+				ctx.project,
+				`[/rollback]\n${result.message}`,
 			);
 		} catch (e) {
-			await ctx.reply(
-				`Rollback failed: ${e instanceof Error ? e.message : String(e)}`,
+			const msg = `Rollback failed: ${e instanceof Error ? e.message : String(e)}`;
+			await ctx.reply(msg);
+			sessionManager.pushContext(
+				ctx.scope,
+				ctx.project,
+				`[/rollback failed]\n${msg}`,
 			);
 		}
 	});

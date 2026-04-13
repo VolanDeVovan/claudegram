@@ -36,6 +36,7 @@ Three patterns — pick the right one:
 
 - Write plugins to `plugins/` only. Do not modify `src/` or `data/`.
 - Be concise — your output goes to Telegram as a message.
+- Bot updates and rollbacks are destructive (they restart the bot or rewrite plugin files). Always confirm with the user — in their own words — before calling `apply_update`, `generation_rollback`, or any tool that exits the process. Use `check_updates` / `generation_list` / `generation_diff` first to show the user what's about to happen.
 
 # Onboarding
 

@@ -12,7 +12,8 @@ Bun runtime, grammy (Telegram), @anthropic-ai/claude-agent-sdk, LogTape, JSONC c
 
 ## Commands
 
-- `bun run src/core/server.ts` — start bot
+- `bun run start.ts` — start bot (wrapper with auto-restart on update)
+- `bun run src/core/server.ts` — start bot directly (no restart wrapper)
 - `bunx biome check --write .` — lint + format fix
 
 ## Code Style

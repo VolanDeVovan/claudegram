@@ -51,6 +51,26 @@ export interface SessionAPI {
 	list(scope: string, projectName?: string): Promise<SessionInfo[]>;
 	activate(sessionId: string): Promise<void>;
 	getActive(scope: string, projectName: string): Promise<SessionInfo | null>;
+	/**
+	 * Add text to the pending context buffer for a (scope, project) pair.
+	 * On the next user message, all pending blocks are prepended to the prompt —
+	 * the agent sees them as context without the user receiving a separate message.
+	 *
+	 * Use this when the agent needs to know something but the user doesn't need a
+	 * visible message. For visible messages, send via `bot.api.sendMessage()` and
+	 * call `pushContext()` separately if the agent should also be aware.
+	 *
+	 * @example
+	 * // Silent context — agent knows, user doesn't see a message
+	 * ctx.sessions.pushContext(scope, project, "[Monitoring] CPU at 92% for 5 min");
+	 *
+	 * // Visible message + agent context
+	 * await ctx.bot.api.sendMessage(Number(scope), "Build failed.");
+	 * ctx.sessions.pushContext(scope, project,
+	 *   "[CI notification]\nBuild failed on commit abc1234.\nError: type mismatch in src/foo.ts:42"
+	 * );
+	 */
+	pushContext(scope: string, project: string, text: string): void;
 }
 
 // ─── Query Result (returned by handleMessage, passed to afterQuery) ─
@@ -113,33 +133,6 @@ export interface PluginContext {
 	scopeStore: ScopeStore;
 	query: (opts: QueryOpts) => AsyncIterable<QueryEvent>;
 	sessions: SessionAPI;
-	/**
-	 * Send a message to the user's DM and register it as pending context for the agent.
-	 * On the next user message, the agent will see what the bot sent — enabling it to
-	 * understand replies like "fix this" or "explain".
-	 *
-	 * @param scope - User scope (used as chatId via Number(scope) for DM delivery)
-	 * @param project - Project context for the pending buffer
-	 * @param text - Message text sent to the user via Telegram
-	 * @param context - Optional custom context for the agent. If omitted, defaults to `text`.
-	 *   Use this to give the agent more detail than the user sees (e.g., full error logs).
-	 *
-	 * @example
-	 * // Simple — agent sees exactly what user sees
-	 * await ctx.notify(scope, project, "Build failed on commit abc1234");
-	 *
-	 * // Custom context — agent gets richer info
-	 * await ctx.notify(scope, project,
-	 *   "Build failed.",
-	 *   "[CI notification]\nBuild failed on commit abc1234.\nError: type mismatch in src/foo.ts:42"
-	 * );
-	 */
-	notify(
-		scope: string,
-		project: string,
-		text: string,
-		context?: string,
-	): Promise<void>;
 }
 
 export interface ToolContext extends PluginContext {

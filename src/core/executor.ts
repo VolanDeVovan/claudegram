@@ -145,10 +145,15 @@ export class Executor {
 		// Build MCP server for tools (core + plugin)
 		const allTools: SdkMcpToolDefinition[] = [];
 		for (const tool of this.coreTools) {
-			const scope = this.config.data.coreTools[tool.name] ?? tool.scope;
-			if (!isScopeAllowed(scope, project, isSelf)) continue;
-			const { scope: _scope, ...sdkTool } = tool;
-			allTools.push(sdkTool);
+			const scopeCfg = this.config.data.coreTools[tool.name] ?? tool.scope;
+			if (!isScopeAllowed(scopeCfg, project, isSelf)) continue;
+			const { scope: _scope, handler: coreHandler, ...rest } = tool;
+			allTools.push({
+				...rest,
+				// SDK may hand a second `extra` arg (request context); no core
+				// tool uses it. Widen CoreToolDef.handler if that changes.
+				handler: (args) => coreHandler(args, toolCtx),
+			});
 		}
 		for (const { tool } of loaded.tools) {
 			const scope = tool.scope ?? "self";

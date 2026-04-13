@@ -8,6 +8,7 @@ import { createPluginCommands, registerCoreCommands } from "./core-commands.ts";
 import { createCoreTools } from "./core-tools.ts";
 import { Executor } from "./executor.ts";
 import { GenerationManager } from "./generation-manager.ts";
+import * as git from "./git.ts";
 import { initLogger } from "./logger.ts";
 import { MessageChannel } from "./message-channel.ts";
 import type {
@@ -23,6 +24,8 @@ import {
 } from "./plugin-loader.ts";
 import { JsonScopeStore } from "./scope-store.ts";
 import { SessionManager } from "./session-manager.ts";
+import type { BotRuntime } from "./update.ts";
+import { sendStartupNotification } from "./update.ts";
 
 const BOT_ROOT = resolve(process.cwd());
 const DATA_DIR = join(BOT_ROOT, "data");
@@ -179,14 +182,31 @@ async function main() {
 		log.info("Message from user {userId} denied", { userId });
 	});
 
+	// Runtime-level state captured by the BotRuntime handle below. Getters
+	// are used for `activeQueries` / `stopRunner` because those are updated
+	// during the message loop and runner setup respectively — any value
+	// captured at construction time would go stale.
+	let activeQueries = 0;
+	let runnerStopFn: (() => Promise<void>) | null = null;
+
+	const runtime: BotRuntime = {
+		rootDir: BOT_ROOT,
+		dataDir: DATA_DIR,
+		generations: generationManager,
+		sessions: sessionManager,
+		activeQueries: () => activeQueries,
+		stopRunner: async () => {
+			if (runnerStopFn) await runnerStopFn();
+		},
+		notify: async (target, text) => {
+			await bot.api.sendMessage(target.chatId, text, {
+				message_thread_id: target.messageThreadId,
+			});
+		},
+	};
+
 	// 7. Core commands — AFTER auth, no guarded() needed
-	registerCoreCommands(
-		bot,
-		sessionManager,
-		config,
-		generationManager,
-		reloadPlugins,
-	);
+	registerCoreCommands(bot, sessionManager, reloadPlugins, runtime);
 
 	// 8. Swappable plugin middleware
 	let currentMiddleware: MiddlewareFn<BotContext> = (_ctx, next) => next();
@@ -209,9 +229,9 @@ async function main() {
 	// Core tools
 	const coreTools = createCoreTools(
 		config,
-		generationManager,
 		() => loadedPlugins,
 		reloadPlugins,
+		runtime,
 	);
 
 	// Executor
@@ -233,10 +253,6 @@ async function main() {
 		scopeStore,
 		query: executor.createQueryFn(),
 		sessions: sessionManager,
-		notify: async (scope, project, text, context) => {
-			await bot.api.sendMessage(Number(scope), text);
-			sessionManager.pushContext(scope, project, context ?? text);
-		},
 	};
 
 	const coreCommandDescriptions: Record<string, string> = {
@@ -245,14 +261,11 @@ async function main() {
 		clear: "Clear current session",
 	};
 
-	// Reload safety
-	let activeQueries = 0;
-	const RELOAD_TIMEOUT_MS = 10_000;
-
 	async function reloadPlugins(): Promise<{
 		loaded: string[];
 		errors: string[];
 	}> {
+		const RELOAD_TIMEOUT_MS = 10_000;
 		const reloadLog = getLogger(["bot", "reload"]);
 		reloadLog.info("Reload started");
 
@@ -316,8 +329,14 @@ async function main() {
 		const errorMsgs = loadedPlugins.errors.map((e) => `${e.path}: ${e.error}`);
 
 		if (loadedPlugins.errors.length === 0) {
+			// Tag every reload snapshot with the current git HEAD so a later
+			// rollback can tell whether this generation's plugins match the
+			// currently checked-out code. Without the hash, applyRollback()
+			// would always take the hot-reload path and silently restore old
+			// plugins onto a newer runtime.
 			generationManager.create(
 				`Reload: ${loadedNames.join(", ") || "no plugins"}`,
+				git.getHead(BOT_ROOT),
 			);
 			reloadLog.info("Reload complete, generation created", {
 				plugins: loadedNames,
@@ -447,10 +466,23 @@ async function main() {
 	});
 
 	const runner = run(bot);
+	runnerStopFn = () => runner.stop();
 	log.info("Polling started (concurrent runner)");
 
-	// Graceful shutdown
-	const stop = () => runner.stop();
+	// Send pending update notification (after restart)
+	sendStartupNotification(runtime).catch((e) => {
+		log.error("Startup notification error: {error}", {
+			error: e instanceof Error ? e.message : String(e),
+		});
+	});
+
+	// Graceful shutdown. runner.stop() by itself only halts polling — the
+	// event loop may still have open handles (timers, network), so Node
+	// wouldn't exit on its own. Explicit exit avoids hanging on Ctrl-C.
+	const stop = async () => {
+		await runner.stop();
+		process.exit(0);
+	};
 	process.once("SIGINT", stop);
 	process.once("SIGTERM", stop);
 }
