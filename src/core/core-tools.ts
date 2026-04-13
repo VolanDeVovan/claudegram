@@ -111,7 +111,7 @@ function formatApplyResult(opts: {
 		"",
 		"If the commits clearly don't affect plugins (internal refactor, docs, core-only fixes), skip migration and respond to the user directly.",
 		"",
-		"The bot will restart automatically when your turn ends — there is nothing else you need to call for that. Just finish your reply.",
+		"The bot will restart automatically when your turn ends. Do NOT call reload_plugins (or any other plugin reload) after migration — it runs against the old in-memory plugin-api.ts and will fail on cached imports. The post-restart reload picks up the migrated plugins automatically. Just finish your reply.",
 		"",
 		"═══ COMMAND TRACE ═══",
 		trace.join("\n").trimEnd(),
@@ -378,12 +378,37 @@ export function createCoreTools(
 
 				const pending = git.pendingCommits(runtime.rootDir);
 				push(pending.command, pending.stdout || "(no commits)");
-				const body = pending.stdout
-					? `Updates available:\n\n${pending.stdout}\n\nTo apply, call apply_update after the user confirms.`
-					: "Already up to date.";
+				if (!pending.stdout) {
+					return textResult(
+						`Already up to date.\n\n═══ COMMAND TRACE ═══\n${trace.join("\n").trimEnd()}`,
+					);
+				}
+
+				// Impact analysis: diff plugin-api.ts between HEAD and upstream.
+				// If the public plugin surface changes, migration-agent will
+				// rewrite plugin files — which is strictly more invasive than
+				// a plain update and needs separate user awareness.
+				const apiDiff = git.diffPath(
+					runtime.rootDir,
+					"HEAD",
+					"@{u}",
+					"src/core/plugin-api.ts",
+				);
+				push(apiDiff.command, apiDiff.stdout || "(no changes)");
+				const apiChanged = apiDiff.stdout.length > 0;
+
+				const impactBlock = apiChanged
+					? [
+							"",
+							"═══ IMPACT ═══",
+							"This update modifies src/core/plugin-api.ts.",
+							"If applied, the migration-agent will REWRITE plugin files in plugins/ to match the new API.",
+							"BEFORE calling apply_update, tell the user plainly that their plugin files will be modified and get explicit confirmation for the migration — not just for the update itself.",
+						].join("\n")
+					: "";
 
 				return textResult(
-					`${body}\n\n═══ COMMAND TRACE ═══\n${trace.join("\n").trimEnd()}`,
+					`Updates available:\n\n${pending.stdout}${impactBlock}\n\nTo apply, call apply_update after the user confirms.\n\n═══ COMMAND TRACE ═══\n${trace.join("\n").trimEnd()}`,
 				);
 			},
 		},
