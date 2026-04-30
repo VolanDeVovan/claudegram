@@ -1,141 +1,39 @@
-import { getLogger } from "@logtape/logtape";
-import type { Bot } from "grammy";
-import {
-	markdownToTelegramHtml,
-	splitTelegramHtmlChunks,
-} from "./markdown-html.ts";
-import type { BotContext, QueryEvent, ResponseTarget } from "./plugin-api.ts";
+import { markdownToTelegramHtml } from "./markdown-html.ts";
+import type { QueryEvent, RenderContext, RenderResult } from "./plugin-api.ts";
+import { messageStream } from "./render-kit.ts";
 
-const log = getLogger(["bot", "renderer"]);
-
-const TELEGRAM_MSG_LIMIT = 4096;
-const EDIT_DEBOUNCE_MS = 300;
-
+/**
+ * Default tail renderer. Live-edits one growing message via `messageStream`.
+ * Reconciles against `complete.text` / `aborted.text` / `error.text` (those
+ * are authoritative; the streamed deltas are a preview).
+ *
+ * Tags artifacts as `role: "body"`, `kind: "primary"` so decorators higher
+ * in the chain can find them via `result.artifacts.findLast(m => m.role === "body")`.
+ */
 export async function defaultRenderer(
 	events: AsyncIterable<QueryEvent>,
-	target: ResponseTarget,
-	bot: Bot<BotContext>,
-): Promise<void> {
+	ctx: RenderContext,
+): Promise<RenderResult> {
+	const stream = messageStream(ctx.bot, ctx.target, {
+		role: "body",
+		kind: "primary",
+	});
 	let text = "";
-	const sentMessages: number[] = [];
-	let lastEditTime = 0;
-	let lastSentText = "";
-	let pendingEdit: ReturnType<typeof setTimeout> | null = null;
-	let rendering: Promise<void> | null = null;
-
-	const sendOpts = target.messageThreadId
-		? { message_thread_id: target.messageThreadId }
-		: {};
-
-	async function flush(): Promise<void> {
-		if (pendingEdit) {
-			clearTimeout(pendingEdit);
-			pendingEdit = null;
-		}
-		await render();
-	}
-
-	async function sendHtml(html: string): Promise<number> {
-		try {
-			const sent = await bot.api.sendMessage(target.chatId, html, {
-				...sendOpts,
-				parse_mode: "HTML",
-			});
-			return sent.message_id;
-		} catch {
-			// HTML parse error — fallback to plain text
-			const sent = await bot.api.sendMessage(
-				target.chatId,
-				html.replace(/<[^>]+>/g, ""),
-				sendOpts,
-			);
-			return sent.message_id;
-		}
-	}
-
-	async function editHtml(msgId: number, html: string): Promise<void> {
-		try {
-			await bot.api.editMessageText(target.chatId, msgId, html, {
-				parse_mode: "HTML",
-			});
-		} catch (e) {
-			const msg = e instanceof Error ? e.message : String(e);
-			// "message is not modified" is fine — skip
-			if (msg.includes("message is not modified")) return;
-			// HTML parse error — retry plain
-			try {
-				await bot.api.editMessageText(
-					target.chatId,
-					msgId,
-					html.replace(/<[^>]+>/g, ""),
-				);
-			} catch (e2) {
-				log.error("Renderer edit error: {error}", {
-					error: e2 instanceof Error ? e2.message : String(e2),
-				});
-			}
-		}
-	}
-
-	async function doRender(): Promise<void> {
-		if (!text || text === lastSentText) return;
-
-		const html = markdownToTelegramHtml(text);
-		const chunks = splitTelegramHtmlChunks(html, TELEGRAM_MSG_LIMIT);
-
-		for (let i = 0; i < chunks.length; i++) {
-			const chunk = chunks[i];
-			if (!chunk) continue;
-			if (i < sentMessages.length) {
-				// Edit existing message
-				await editHtml(sentMessages[i] as number, chunk);
-			} else {
-				// Send new message
-				log.debug("Sending chunk {i}/{total} ({len} chars)", {
-					i: i + 1,
-					total: chunks.length,
-					len: chunk.length,
-				});
-				const msgId = await sendHtml(chunk);
-				sentMessages.push(msgId);
-			}
-		}
-
-		lastSentText = text;
-		lastEditTime = Date.now();
-	}
-
-	async function render(): Promise<void> {
-		// Serialize renders to prevent concurrent sends of the same chunk
-		if (rendering) await rendering;
-		rendering = doRender();
-		try {
-			await rendering;
-		} finally {
-			rendering = null;
-		}
-	}
-
-	function scheduleEdit(): void {
-		const now = Date.now();
-		const elapsed = now - lastEditTime;
-
-		if (elapsed >= EDIT_DEBOUNCE_MS) {
-			render();
-		} else if (!pendingEdit) {
-			pendingEdit = setTimeout(() => {
-				pendingEdit = null;
-				render();
-			}, EDIT_DEBOUNCE_MS - elapsed);
-		}
-	}
 
 	for await (const event of events) {
 		if (event.type === "text_delta") {
 			text += event.delta;
-			scheduleEdit();
+			stream.set(markdownToTelegramHtml(text));
+		} else if (event.type === "complete" || event.type === "aborted") {
+			if (event.text && event.text !== text) text = event.text;
+			stream.set(markdownToTelegramHtml(text));
+		} else if (event.type === "error") {
+			if (event.text && event.text !== text) text = event.text;
+			text = text ? `${text}\n\n⚠️ ${event.message}` : `⚠️ ${event.message}`;
+			stream.set(markdownToTelegramHtml(text));
 		}
 	}
 
-	await flush();
+	await stream.flush();
+	return { artifacts: stream.artifacts() };
 }

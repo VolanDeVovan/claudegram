@@ -21,9 +21,14 @@ import type {
 	QueryEvent,
 	QueryOpts,
 	QueryResult,
+	RenderContext,
+	RenderResult,
 	ResponseTarget,
+	TokenUsage,
 	ToolContext,
+	TurnOutcome,
 } from "./plugin-api.ts";
+import { EMPTY_RESULT } from "./plugin-api.ts";
 import type { LoadedPlugins } from "./plugin-loader.ts";
 import { defaultRenderer } from "./response-renderer.ts";
 import type { ScopeStore } from "./scope-store.ts";
@@ -122,6 +127,22 @@ export class Executor {
 		const model = projectConfig?.model ?? this.config.data.model;
 		const loaded = this.getLoadedPlugins();
 
+		// We always operate through our own AbortController. If the caller
+		// provided an AbortSignal, forward its abort event to the local one;
+		// this lets the SDK call abortController.abort() and have it actually
+		// set signal.aborted (a synthetic { abort: dispatchEvent } only fires
+		// listeners, it doesn't flip the aborted flag). The local controller
+		// also stays referenced for the generator's lifetime — a signal from
+		// an unreferenced controller can never abort.
+		const ownController = new AbortController();
+		const onExternalAbort = () => ownController.abort();
+		if (opts.signal) {
+			if (opts.signal.aborted) ownController.abort();
+			else
+				opts.signal.addEventListener("abort", onExternalAbort, { once: true });
+		}
+		const signal = ownController.signal;
+
 		// Build ToolContext once per query
 		const toolCtx: ToolContext = {
 			bot: this.bot,
@@ -133,14 +154,15 @@ export class Executor {
 			scope: opts.scope,
 			project,
 			cwd,
-			signal: opts.signal ?? new AbortController().signal,
+			signal,
 			chatId: target?.chatId,
 			messageThreadId: target?.messageThreadId,
 		};
 
-		// Track tool calls for QueryResult
-		const toolCallTimers = new Map<string, number>();
-		const toolCallResults: Array<{ tool: string; durationMs: number }> = [];
+		// Track tool calls so `tool_end` events can carry the real tool name
+		// (the SDK's tool_result block doesn't include it) and a duration.
+		// Pair via callId, populated on tool_use, drained on tool_result.
+		const toolCallTimers = new Map<string, { tool: string; start: number }>();
 
 		// Build MCP server for tools (core + plugin)
 		const allTools: SdkMcpToolDefinition[] = [];
@@ -180,12 +202,7 @@ export class Executor {
 			model,
 			maxTurns: this.config.data.maxTurns,
 			settingSources: ["user", "project", "local"],
-			abortController: opts.signal
-				? ({
-						abort: () => opts.signal?.dispatchEvent(new Event("abort")),
-						signal: opts.signal,
-					} as AbortController)
-				: undefined,
+			abortController: ownController,
 			systemPrompt: isSelf ? this.selfSystemPrompt : undefined,
 			permissionMode: "bypassPermissions",
 			allowDangerouslySkipPermissions: true,
@@ -308,6 +325,58 @@ export class Executor {
 		let turns = 0;
 		let costUsd = 0;
 		let hadTextOutput = false;
+		let blockCounter = 0;
+		let usage: TokenUsage = {
+			inputTokens: 0,
+			outputTokens: 0,
+			cacheReadInputTokens: 0,
+			cacheCreationInputTokens: 0,
+		};
+		let stopReason: string | null = null;
+
+		function snapshotUsage(success: SDKResultSuccess): TokenUsage {
+			const u = success.usage as Record<string, unknown>;
+			return {
+				inputTokens: Number(u.input_tokens ?? 0),
+				outputTokens: Number(u.output_tokens ?? 0),
+				cacheReadInputTokens: Number(u.cache_read_input_tokens ?? 0),
+				cacheCreationInputTokens: Number(u.cache_creation_input_tokens ?? 0),
+			};
+		}
+
+		function categorizeErrorCause(
+			subtype: string | undefined,
+		):
+			| "transport"
+			| "max_turns"
+			| "max_budget"
+			| "structured_output"
+			| "execution"
+			| "unknown" {
+			switch (subtype) {
+				case "error_max_turns":
+					return "max_turns";
+				case "error_max_budget_usd":
+					return "max_budget";
+				case "error_max_structured_output_retries":
+					return "structured_output";
+				case "error_during_execution":
+					return "execution";
+				default:
+					return "unknown";
+			}
+		}
+
+		// Single terminal — exactly one of complete | error | aborted is yielded
+		// at the end of this generator. Setting `terminal` to non-null short-
+		// circuits the default `complete`. Nothing else yields a terminal event.
+		type Terminal = Extract<
+			QueryEvent,
+			{ type: "complete" | "error" | "aborted" }
+		>;
+		let terminal: Terminal | null = null;
+
+		yield { type: "start" };
 
 		try {
 			const q = sdkQuery({ prompt, options: sdkOptions });
@@ -316,90 +385,233 @@ export class Executor {
 				const msg = message as SDKMessage;
 
 				if (msg.type === "assistant") {
+					const parentCallId =
+						(msg as { parent_tool_use_id: string | null }).parent_tool_use_id ??
+						null;
 					for (const block of msg.message.content) {
 						if (block.type === "text") {
 							const sep = hadTextOutput && block.text.length > 0 ? "\n\n" : "";
-							yield { type: "text_delta", delta: sep + block.text };
+							yield {
+								type: "text_delta",
+								delta: sep + block.text,
+								blockIndex: blockCounter++,
+							};
 							totalText += sep + block.text;
 							hadTextOutput = true;
 						} else if (block.type === "thinking") {
 							yield {
 								type: "thinking_delta",
 								delta: (block as Record<string, string>).thinking ?? "",
+								blockIndex: blockCounter++,
 							};
 						} else if (block.type === "tool_use") {
 							const callId =
 								(block as Record<string, string>).id ?? randomUUID();
-							toolCallTimers.set(callId, Date.now());
+							toolCallTimers.set(callId, {
+								tool: block.name,
+								start: Date.now(),
+							});
 							yield {
 								type: "tool_start",
 								callId,
 								tool: block.name,
 								input: block.input,
+								parentCallId,
 							};
 						}
 					}
 					resultSessionId = msg.session_id;
-				} else if (msg.type === "tool") {
-					// Tool results — emit tool_end events
-					const toolMsg = msg as Record<string, unknown>;
-					const content = toolMsg.content as
-						| Array<Record<string, string>>
-						| undefined;
-					let matched = false;
-					if (content) {
-						for (const block of content) {
+				} else if (msg.type === "user") {
+					// Tool results arrive as user messages with `tool_result` content
+					// blocks. The SDK has no top-level `tool` message variant — this is
+					// where `tool_end` is emitted.
+					const userMsg = msg as {
+						message: { content: unknown };
+						session_id?: string;
+					};
+					const content = userMsg.message.content;
+					if (Array.isArray(content)) {
+						for (const block of content as Array<Record<string, unknown>>) {
 							if (block.type === "tool_result") {
-								matched = true;
-								const callId = block.tool_use_id ?? "";
-								const startMs = toolCallTimers.get(callId);
-								const durationMs = startMs ? Date.now() - startMs : 0;
+								const callId = String(block.tool_use_id ?? "");
+								const timer = toolCallTimers.get(callId);
 								toolCallTimers.delete(callId);
-								toolCallResults.push({
-									tool: block.tool_name ?? "unknown",
-									durationMs,
-								});
+								const tool = timer?.tool ?? "unknown";
+
+								let output = "";
+								const c = block.content;
+								if (typeof c === "string") {
+									output = c;
+								} else if (Array.isArray(c)) {
+									for (const part of c as Array<Record<string, unknown>>) {
+										if (part.type === "text" && typeof part.text === "string")
+											output += part.text;
+									}
+								}
+								const isError = block.is_error === true;
 								yield {
 									type: "tool_end",
 									callId,
-									tool: block.tool_name ?? "unknown",
-									output: block.text ?? "",
+									tool,
+									output,
+									isError,
 								};
 							}
 						}
 					}
-					if (!matched) {
-						log.warn(
-							"Tool message without tool_result blocks — SDK format may have changed",
-							{
-								type: msg.type,
-								keys: content ? content.map((b) => b.type) : "no content",
+				} else if (msg.type === "system") {
+					const sys = msg as Record<string, unknown>;
+					const subtype = String(sys.subtype ?? "");
+					if (subtype === "api_retry") {
+						const err = sys.error as Record<string, unknown> | undefined;
+						yield {
+							type: "retry",
+							attempt: Number(sys.attempt ?? 0),
+							maxRetries: Number(sys.max_retries ?? 0),
+							delayMs: Number(sys.retry_delay_ms ?? 0),
+							reason:
+								typeof err?.message === "string" ? err.message : "transient",
+						};
+					} else if (subtype === "task_started") {
+						yield {
+							type: "task_start",
+							taskId: String(sys.task_id ?? ""),
+							description: String(sys.description ?? ""),
+							taskType:
+								typeof sys.task_type === "string" ? sys.task_type : undefined,
+							parentCallId:
+								typeof sys.tool_use_id === "string" ? sys.tool_use_id : null,
+						};
+					} else if (subtype === "task_progress") {
+						const u = sys.usage as Record<string, unknown> | undefined;
+						yield {
+							type: "task_progress",
+							taskId: String(sys.task_id ?? ""),
+							description: String(sys.description ?? ""),
+							summary:
+								typeof sys.summary === "string" ? sys.summary : undefined,
+							lastTool:
+								typeof sys.last_tool === "string" ? sys.last_tool : undefined,
+							usage: {
+								totalTokens: Number(u?.total_tokens ?? 0),
+								toolUses: Number(u?.tool_uses ?? 0),
+								durationMs: Number(u?.duration_ms ?? 0),
 							},
-						);
+						};
+					} else if (subtype === "task_notification") {
+						const u = sys.usage as Record<string, unknown> | undefined;
+						const status = String(sys.status ?? "completed") as
+							| "completed"
+							| "failed"
+							| "stopped";
+						yield {
+							type: "task_end",
+							taskId: String(sys.task_id ?? ""),
+							status,
+							summary: String(sys.summary ?? ""),
+							outputFile:
+								typeof sys.output_file === "string"
+									? sys.output_file
+									: undefined,
+							usage: {
+								totalTokens: Number(u?.total_tokens ?? 0),
+								toolUses: Number(u?.tool_uses ?? 0),
+								durationMs: Number(u?.duration_ms ?? 0),
+							},
+						};
+					} else if (subtype === "compact_boundary") {
+						yield { type: "compact", phase: "boundary" };
+					} else if (subtype === "status") {
+						const status = String(sys.status ?? "");
+						if (status === "compacting")
+							yield { type: "compact", phase: "start" };
 					}
+					// Other system subtypes (init, etc.) are intentionally dropped.
+				} else if (msg.type === "rate_limit_event") {
+					const rl = msg as Record<string, unknown>;
+					const info = rl.rate_limit_info as
+						| Record<string, unknown>
+						| undefined;
+					if (info) {
+						const status = info.status as
+							| "allowed"
+							| "allowed_warning"
+							| "rejected"
+							| undefined;
+						if (status) {
+							yield {
+								type: "rate_limit",
+								status,
+								utilization:
+									typeof info.utilization === "number"
+										? info.utilization
+										: undefined,
+								resetsAt:
+									typeof info.resetsAt === "number" ? info.resetsAt : undefined,
+								kind:
+									typeof info.rateLimitType === "string"
+										? (info.rateLimitType as
+												| "five_hour"
+												| "seven_day"
+												| "seven_day_opus"
+												| "seven_day_sonnet"
+												| "overage")
+										: undefined,
+							};
+						}
+					}
+				} else if (msg.type === "tool_progress") {
+					const tp = msg as Record<string, unknown>;
+					yield {
+						type: "tool_progress",
+						callId: typeof tp.tool_use_id === "string" ? tp.tool_use_id : "",
+						tool: typeof tp.tool_name === "string" ? tp.tool_name : "unknown",
+						elapsedSeconds:
+							typeof tp.elapsed_time_seconds === "number"
+								? tp.elapsed_time_seconds
+								: 0,
+					};
 				} else if (msg.type === "result") {
 					resultSessionId = msg.session_id;
 					if (msg.subtype === "success") {
 						const success = msg as SDKResultSuccess;
 						turns = success.num_turns;
 						costUsd = success.total_cost_usd;
-						if (success.result && success.result !== totalText) {
-							yield { type: "text_delta", delta: success.result };
-							totalText = success.result;
-							hadTextOutput = true;
-						}
+						usage = snapshotUsage(success);
+						stopReason = success.stop_reason;
+						// Authoritative final text. Renderers reconcile against this
+						// on `complete` if they were live-editing from text_delta.
+						if (success.result) totalText = success.result;
 					} else {
 						const reason = msg.subtype ?? "unknown";
+						const m = msg as Record<string, unknown>;
+						if (typeof m.num_turns === "number") turns = m.num_turns;
+						if (typeof m.total_cost_usd === "number")
+							costUsd = m.total_cost_usd;
+						if (m.usage) {
+							const u = m.usage as Record<string, unknown>;
+							usage = {
+								inputTokens: Number(u.input_tokens ?? 0),
+								outputTokens: Number(u.output_tokens ?? 0),
+								cacheReadInputTokens: Number(u.cache_read_input_tokens ?? 0),
+								cacheCreationInputTokens: Number(
+									u.cache_creation_input_tokens ?? 0,
+								),
+							};
+						}
 						log.warn("Query ended with non-success result: {reason}", {
 							reason,
 							project,
 						});
-						const sep = hadTextOutput ? "\n\n" : "";
-						yield {
-							type: "text_delta",
-							delta: `${sep}⚠️ Agent stopped with error: ${reason}`,
+						terminal = {
+							type: "error",
+							message: `Agent stopped with error: ${reason}`,
+							text: totalText,
+							turns,
+							costUsd,
+							usage,
+							cause: categorizeErrorCause(reason),
 						};
-						hadTextOutput = true;
 					}
 
 					// Close channel so streamInput() finishes and calls endInput(),
@@ -410,22 +622,24 @@ export class Executor {
 					if (opts.channel && !opts.channel.closed) {
 						opts.channel.close();
 					}
+					break;
 				}
 			}
 		} catch (e) {
-			if (opts.signal?.aborted) {
+			if (signal.aborted) {
 				log.info("Query aborted for project {project}", { project });
-				yield { type: "done", finalText: "", turns: 0 };
-				return;
-			}
-
-			log.error("Query failed for project {project}: {error}", {
-				project,
-				error: e instanceof Error ? e.message : String(e),
-			});
-
-			// If resume failed, try fresh session
-			if (sessionId) {
+				terminal = {
+					type: "aborted",
+					text: totalText,
+					turns,
+					costUsd,
+					usage,
+				};
+			} else if (sessionId) {
+				log.error("Query failed for project {project}: {error}", {
+					project,
+					error: e instanceof Error ? e.message : String(e),
+				});
 				log.warn("Session resume failed, starting fresh", {
 					sessionId,
 					error: e instanceof Error ? e.message : String(e),
@@ -443,7 +657,11 @@ export class Executor {
 								if (block.type === "text") {
 									const sep =
 										hadTextOutput && block.text.length > 0 ? "\n\n" : "";
-									yield { type: "text_delta", delta: sep + block.text };
+									yield {
+										type: "text_delta",
+										delta: sep + block.text,
+										blockIndex: blockCounter++,
+									};
 									totalText += sep + block.text;
 									hadTextOutput = true;
 								}
@@ -455,29 +673,54 @@ export class Executor {
 								const success = msg as SDKResultSuccess;
 								turns = success.num_turns;
 								costUsd = success.total_cost_usd;
+								usage = snapshotUsage(success);
+								stopReason = success.stop_reason;
+								if (success.result) totalText = success.result;
 							}
+							break;
 						}
 					}
 				} catch (e2) {
 					log.error("Fresh query also failed: {error}", {
 						error: e2 instanceof Error ? e2.message : String(e2),
 					});
-					yield {
-						type: "text_delta",
-						delta: `Error: ${e2 instanceof Error ? e2.message : String(e2)}`,
+					terminal = {
+						type: "error",
+						message: e2 instanceof Error ? e2.message : String(e2),
+						text: totalText,
+						turns,
+						costUsd,
+						usage,
+						// Thrown exception, not an SDK result subtype — we can't
+						// reliably classify (it might be transport, but might also be
+						// a tool throw, schema mismatch, etc.). Renderers that need
+						// granularity can match on `message`.
+						cause: "unknown",
 					};
 				}
 			} else {
-				yield {
-					type: "text_delta",
-					delta: `Error: ${e instanceof Error ? e.message : String(e)}`,
+				log.error("Query failed for project {project}: {error}", {
+					project,
+					error: e instanceof Error ? e.message : String(e),
+				});
+				terminal = {
+					type: "error",
+					message: e instanceof Error ? e.message : String(e),
+					text: totalText,
+					turns,
+					costUsd,
+					cause: "unknown",
+					usage,
 				};
 			}
 		} finally {
 			stopWatchdog();
+			opts.signal?.removeEventListener("abort", onExternalAbort);
 		}
 
-		// Persist session
+		// Persist session whenever we have one — independent of how the turn
+		// ended. A turn that errored mid-stream may still have done real work
+		// the SDK already billed for; throwing that state away wastes context.
 		if (resultSessionId) {
 			const existingSession = await this.sessionManager.getActiveSessionId(
 				opts.scope,
@@ -513,7 +756,14 @@ export class Executor {
 			duration,
 		});
 
-		yield { type: "done", finalText: totalText, turns };
+		yield terminal ?? {
+			type: "complete",
+			text: totalText,
+			turns,
+			costUsd,
+			usage,
+			stopReason,
+		};
 	}
 
 	createQueryFn(): (opts: QueryOpts) => AsyncIterable<QueryEvent> {
@@ -546,53 +796,143 @@ export class Executor {
 			toolCalls: [],
 		};
 
+		// If caller didn't provide a signal, own one for the duration of this
+		// call so the AbortController isn't GC'd. Same reasoning as in
+		// executeQuery — a signal whose controller is unreachable can never
+		// abort, which silently breaks every `signal.aborted` check downstream.
+		const ownController = opts.signal ? null : new AbortController();
+		const signal = opts.signal ?? (ownController as AbortController).signal;
+		const normalizedOpts = ownController ? { ...opts, signal } : opts;
+
 		try {
-			// Wrap events to capture QueryResult from the done event
-			const rawEvents = this.executeQuery(opts, target);
+			// Wrap events to capture QueryResult from the terminal event
+			const rawEvents = this.executeQuery(normalizedOpts, target);
 			const toolCalls: Array<{ tool: string; durationMs: number }> = [];
 			const toolTimers = new Map<string, { tool: string; start: number }>();
+
+			// outcome promise — resolves with the terminal event so renderers
+			// don't have to write spy generators just to read final stats.
+			// Always resolves: the executeQuery generator guarantees one
+			// terminal; the synthetic fallback below covers the impossible
+			// "stream ended without terminal" case (kernel bug).
+			let resolveOutcome!: (t: TurnOutcome) => void;
+			const outcomePromise = new Promise<TurnOutcome>((r) => {
+				resolveOutcome = r;
+			});
+			let outcomeResolved = false;
+			const settleOutcome = (t: TurnOutcome) => {
+				if (outcomeResolved) return;
+				outcomeResolved = true;
+				resolveOutcome(t);
+			};
 
 			async function* captureResult(
 				source: AsyncIterable<QueryEvent>,
 			): AsyncIterable<QueryEvent> {
-				for await (const event of source) {
-					if (event.type === "tool_start") {
-						toolTimers.set(event.callId, {
-							tool: event.tool,
-							start: Date.now(),
-						});
-					} else if (event.type === "tool_end") {
-						const timer = toolTimers.get(event.callId);
-						if (timer) {
-							toolCalls.push({
-								tool: timer.tool,
-								durationMs: Date.now() - timer.start,
+				try {
+					for await (const event of source) {
+						if (event.type === "tool_start") {
+							toolTimers.set(event.callId, {
+								tool: event.tool,
+								start: Date.now(),
 							});
-							toolTimers.delete(event.callId);
+						} else if (event.type === "tool_end") {
+							const timer = toolTimers.get(event.callId);
+							if (timer) {
+								toolCalls.push({
+									tool: timer.tool,
+									durationMs: Date.now() - timer.start,
+								});
+								toolTimers.delete(event.callId);
+							}
+						} else if (
+							event.type === "complete" ||
+							event.type === "aborted" ||
+							event.type === "error"
+						) {
+							// All three terminals carry partial state — populate the
+							// QueryResult uniformly so afterQuery sees real numbers.
+							result.finalText = event.text;
+							result.turns = event.turns;
+							result.costUsd = event.costUsd;
+							result.usage = event.usage;
+							if (event.type === "complete") {
+								result.stopReason = event.stopReason;
+							} else if (event.type === "error") {
+								result.error = new Error(event.message);
+							}
+							settleOutcome(event);
 						}
-					} else if (event.type === "done") {
-						result.finalText = event.finalText;
-						result.turns = event.turns;
+						yield event;
 					}
-					yield event;
+				} finally {
+					// Defense: if the source completed without a terminal (a kernel
+					// bug — should not happen), synthesize one so any awaiter of
+					// `ctx.outcome` doesn't hang.
+					if (!outcomeResolved) {
+						settleOutcome({
+							type: "error",
+							message: "Stream ended without terminal event",
+							text: result.finalText,
+							turns: result.turns,
+							costUsd: result.costUsd,
+							usage: result.usage ?? {
+								inputTokens: 0,
+								outputTokens: 0,
+								cacheReadInputTokens: 0,
+								cacheCreationInputTokens: 0,
+							},
+							cause: "unknown",
+						});
+					}
 				}
 			}
 			const events = captureResult(rawEvents);
 
-			// Build render chain: plugins sorted by priority, defaultRenderer last
-			type RenderFn = (
-				events: AsyncIterable<QueryEvent>,
-				target: ResponseTarget,
-				bot: Bot<BotContext>,
-			) => Promise<void>;
+			// Build render chain: plugin renderers sorted by priority, default last.
+			// Renderers return a RenderResult that flows back through `next` so
+			// decorators can inspect what downstream produced (no side-channel).
+			const renderCtx: RenderContext = {
+				bot: this.bot,
+				target,
+				signal,
+				outcome: outcomePromise,
+				config: this.config,
+				scopeStore: this.scopeStore,
+				query: this.createQueryFn(),
+				pushContext: (text: string) =>
+					this.sessionManager.pushContext(target.scope, target.project, text),
+			};
 
-			let render: RenderFn = defaultRenderer;
-			for (const mw of loaded.renderMiddlewares.toReversed()) {
+			type Next = (events: AsyncIterable<QueryEvent>) => Promise<RenderResult>;
+			let render: Next = (e) => defaultRenderer(e, renderCtx);
+			// Renderers are sorted ascending (lowest priority first). Wrapping
+			// in reverse makes the lowest-priority plugin the OUTERMOST layer,
+			// so it runs first and decides whether to delegate via `next`.
+			for (const r of loaded.renderers.toReversed()) {
 				const next = render;
-				render = (events, target, bot) =>
-					mw.handler(events, target, bot, (e) => next(e, target, bot));
+				const handler = r.handler;
+				const pluginName = r.pluginName;
+				// Per-renderer error isolation: a buggy plugin must not break the
+				// chain. Log the failure and fall through to `next` so the rest
+				// of the chain (and the default renderer) still produces a reply.
+				// Critical for self-modifying bot — the agent writes renderers
+				// and may ship one that throws.
+				render = async (e) => {
+					try {
+						return await handler(e, renderCtx, next);
+					} catch (err) {
+						log.error("Renderer {plugin} threw — falling through to next", {
+							plugin: pluginName,
+							error: err instanceof Error ? err.message : String(err),
+						});
+						return await next(e).catch(() => EMPTY_RESULT);
+					}
+				};
 			}
-			await render(events, target, this.bot);
+			const renderResult = await render(events);
+			result.renderArtifacts = renderResult.artifacts;
+			result.renderMeta = renderResult.meta;
 
 			result.toolCalls = toolCalls;
 		} catch (e) {

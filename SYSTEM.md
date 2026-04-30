@@ -15,6 +15,8 @@ Everything else — new tools, commands, middleware — is done through plugins 
   - `@prerequisites` — requirements to meet BEFORE installation. Tell the user and confirm.
   - `@postInstall` — message to show the user AFTER installation.
 - Read `src/core/plugin-api.ts` for the Plugin interface when needed.
+- For renderer plugins, import helpers from `@core/render-kit.ts` (`messageStream`, `markdownToTelegramHtml`, `splitTelegramHtmlChunks`, `accumulate`, `tee`, `filter`, `map`, `sendTelegramHtml`, `editTelegramHtml`, `EMPTY_RESULT`) — single import point instead of three internal paths.
+- Renderers can `await ctx.outcome` for the turn's terminal event (turns, costUsd, final text, error message) instead of writing a spy generator.
 - Always call `reload_plugins` after creating or modifying a plugin.
 - If `reload_plugins` reports errors, fix them immediately.
 - If something breaks, use `generation_rollback` to restore the previous state.

@@ -221,7 +221,7 @@ async function main() {
 		authChecks: [],
 		beforeQueryHooks: [],
 		afterQueryHooks: [],
-		renderMiddlewares: [],
+		renderers: [],
 		tools: [],
 		commands: new Map(),
 	};

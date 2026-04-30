@@ -58,9 +58,10 @@ export interface LoadedPlugins {
 		priority: number;
 		handler: NonNullable<Plugin["afterQuery"]>;
 	}>;
-	renderMiddlewares: Array<{
+	renderers: Array<{
 		priority: number;
-		handler: NonNullable<Plugin["renderMiddleware"]>;
+		pluginName: string;
+		handler: NonNullable<Plugin["renderer"]>;
 	}>;
 	tools: Array<{ plugin: string; tool: NonNullable<Plugin["tools"]>[number] }>;
 	commands: Map<
@@ -86,7 +87,7 @@ export async function loadPlugins(
 		authChecks: [],
 		beforeQueryHooks: [],
 		afterQueryHooks: [],
-		renderMiddlewares: [],
+		renderers: [],
 		tools: [],
 		commands: new Map(),
 	};
@@ -171,10 +172,11 @@ export async function loadPlugins(
 				});
 			}
 
-			if (plugin.renderMiddleware) {
-				result.renderMiddlewares.push({
+			if (plugin.renderer) {
+				result.renderers.push({
 					priority: plugin.priority ?? 50,
-					handler: plugin.renderMiddleware,
+					pluginName: plugin.name,
+					handler: plugin.renderer,
 				});
 			}
 
@@ -216,7 +218,7 @@ export async function loadPlugins(
 	result.contextResolvers.sort((a, b) => a.priority - b.priority);
 	result.beforeQueryHooks.sort((a, b) => a.priority - b.priority);
 	result.afterQueryHooks.sort((a, b) => a.priority - b.priority);
-	result.renderMiddlewares.sort((a, b) => a.priority - b.priority);
+	result.renderers.sort((a, b) => a.priority - b.priority);
 
 	log.info("Loaded {count} plugins: {names}", {
 		count: result.plugins.length,
