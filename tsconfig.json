@@ -33,5 +33,6 @@
 			"@templates/*": ["./src/templates/*"],
 			"@setup/*": ["./src/setup/*"]
 		}
-	}
+	},
+	"exclude": ["node_modules", "data"]
 }
