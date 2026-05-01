@@ -1,3 +1,4 @@
+import type { Query } from "@anthropic-ai/claude-agent-sdk";
 import { getLogger } from "@logtape/logtape";
 import type { ConfigManager } from "./config.ts";
 import { JsonStore } from "./json-store.ts";
@@ -11,6 +12,7 @@ export class SessionManager implements SessionAPI {
 	private config: ConfigManager;
 	private sessionLocks = new Map<string, Promise<void>>();
 	private activeControllers = new Map<string, AbortController>();
+	private activeQueries = new Map<string, Query>();
 	private activeChannels = new Map<string, MessageChannel>();
 	private pendingContext = new Map<string, string[]>();
 
@@ -225,6 +227,22 @@ export class SessionManager implements SessionAPI {
 		this.activeChannels.delete(this.lockKey(scope, project));
 	}
 
+	// ── Active SDK query handle (for force-kill on /cancel) ──
+	//
+	// abortController.abort() alone can't unblock a for-await loop parked on
+	// a wedged subprocess (e.g. SDK CLI stuck reading stdout from a hung
+	// `zsh -c '... find ...'` grandchild). Query.close() is the documented
+	// SDK escape hatch — it terminates the CLI subprocess and makes the
+	// for-await throw, so executor's finally runs and the lock releases.
+
+	setActiveQuery(scope: string, project: string, query: Query): void {
+		this.activeQueries.set(this.lockKey(scope, project), query);
+	}
+
+	removeActiveQuery(scope: string, project: string): void {
+		this.activeQueries.delete(this.lockKey(scope, project));
+	}
+
 	// ── Pending context (bot-sent messages for agent awareness) ──
 
 	pushContext(scope: string, project: string, text: string): void {
@@ -250,11 +268,23 @@ export class SessionManager implements SessionAPI {
 			this.activeChannels.delete(key);
 		}
 
+		const query = this.activeQueries.get(key);
+		if (query) {
+			try {
+				query.close();
+			} catch (e) {
+				log.warn("query.close() threw: {error}", {
+					error: e instanceof Error ? e.message : String(e),
+				});
+			}
+			this.activeQueries.delete(key);
+		}
+
 		const controller = this.activeControllers.get(key);
 		if (controller) {
 			controller.abort();
 			return true;
 		}
-		return false;
+		return query != null;
 	}
 }

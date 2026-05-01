@@ -380,6 +380,7 @@ export class Executor {
 
 		try {
 			const q = sdkQuery({ prompt, options: sdkOptions });
+			this.sessionManager.setActiveQuery(opts.scope, project, q);
 
 			for await (const message of q) {
 				const msg = message as SDKMessage;
@@ -650,6 +651,7 @@ export class Executor {
 				try {
 					const retryPrompt = opts.message;
 					const q = sdkQuery({ prompt: retryPrompt, options: sdkOptions });
+					this.sessionManager.setActiveQuery(opts.scope, project, q);
 					for await (const message of q) {
 						const msg = message as SDKMessage;
 						if (msg.type === "assistant") {
@@ -716,6 +718,7 @@ export class Executor {
 		} finally {
 			stopWatchdog();
 			opts.signal?.removeEventListener("abort", onExternalAbort);
+			this.sessionManager.removeActiveQuery(opts.scope, project);
 		}
 
 		// Persist session whenever we have one — independent of how the turn
