@@ -263,12 +263,14 @@ export interface MessageStream {
 }
 
 /**
- * Pass-through async iterable that accumulates assistant text. Returns the
- * forwarded events plus a `getText()` that returns the latest reconciled
- * value (deltas concatenated, replaced by `complete.text` on terminal).
+ * Pass-through async iterable that accumulates assistant text across blocks.
+ * Returns the forwarded events plus a `getText()` that returns the latest
+ * reconciled value: deltas concatenated, successive text blocks joined with
+ * `"\n\n"`, replaced by `complete.text` on terminal.
  *
- * Cuts the recurring 5-line dance every text-body renderer would otherwise
- * write.
+ * Cuts the recurring "track block boundaries + accumulate deltas" dance every
+ * text-body renderer would otherwise write. The default renderer is one
+ * `for await` away from this helper.
  *
  * @example
  *   const { events: evs, getText } = accumulate(events);
@@ -282,10 +284,14 @@ export function accumulate(source: AsyncIterable<QueryEvent>): {
 	getText: () => string;
 } {
 	let text = "";
+	let textBlocks = 0;
 	async function* forward(): AsyncIterable<QueryEvent> {
 		for await (const e of source) {
-			if (e.type === "text_delta") text += e.delta;
-			else if (
+			if (e.type === "text_start") {
+				if (textBlocks++ > 0) text += "\n\n";
+			} else if (e.type === "text_delta") {
+				text += e.delta;
+			} else if (
 				e.type === "complete" ||
 				e.type === "aborted" ||
 				e.type === "error"

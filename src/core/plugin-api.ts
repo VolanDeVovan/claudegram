@@ -46,22 +46,43 @@ export interface TaskUsage {
  * `text_delta` plus the terminal.
  *
  * - **Lifecycle**: `start`, `complete`, `error`, `aborted`.
- * - **Assistant content** (block-level): `text_delta`, `thinking_delta`.
+ * - **Assistant content** (block-level): `text_start`, `text_delta`,
+ *   `thinking_start`, `thinking_delta`.
  * - **Tools**: `tool_start`, `tool_progress`, `tool_end`.
  * - **Subagents** (Task tool): `task_start`, `task_progress`, `task_end`.
  * - **Telemetry**: `retry`, `rate_limit`, `compact`.
  *
+ * # Block lifecycle (text & thinking)
+ * Every assistant text block is announced by a `text_start` event before any
+ * `text_delta` for it arrives. Subsequent `text_delta` events carry the
+ * incremental tokens of the **most recent** `text_start` — there is no
+ * `blockIndex`, no shared counter, and no hidden coupling with thinking or
+ * tool events. Same contract for `thinking_start` / `thinking_delta`.
+ *
+ * A turn looks like (text → tool → more text → done):
+ *
+ *     start
+ *     text_start                      ← new bubble
+ *       text_delta ("Looking ")
+ *       text_delta ("at it…")
+ *     tool_start / tool_end
+ *     text_start                      ← second bubble (model resumed text)
+ *       text_delta ("Done.")
+ *     complete
+ *
+ * Renderers that want a single answer message join blocks themselves (the
+ * default renderer puts `"\n\n"` between them). Renderers that want one
+ * Telegram message **per** text block — open a new bubble on `text_start`,
+ * write deltas to it. No more "did blockIndex jump?" guesswork.
+ *
  * # Deltas vs snapshots
  * `text_delta` / `thinking_delta` are strictly incremental. The kernel never
- * re-emits content; concatenation gives well-formed text.
+ * re-emits content. Concatenating all deltas of a single block gives that
+ * block's clean text — no leading separators, no trimming required.
  *
- * `complete.text` is the authoritative final text. Reconcile against it on
- * `complete` if you've been live-editing from deltas.
- *
- * # Successive blocks
- * Successive assistant text blocks (text → tool → more text) are joined by a
- * `"\n\n"` *prefix* on the next block's delta. Concatenation gives well-formed
- * text; there is no standalone separator event.
+ * `complete.text` is the authoritative final text (all text blocks joined
+ * with `"\n\n"`). Reconcile against it on `complete` if you've been
+ * live-editing from deltas.
  *
  * # Tool call linking
  * `tool_start` / `tool_progress` / `tool_end` share a `callId`. `parentCallId`
@@ -77,10 +98,18 @@ export type QueryEvent =
 	| { type: "start" }
 
 	// ─── Assistant content (block-level) ─────────────────────────
-	/** Strictly incremental — append to your buffer. Never a snapshot. */
-	| { type: "text_delta"; delta: string; blockIndex: number }
-	/** Reasoning text. Safe to drop entirely. */
-	| { type: "thinking_delta"; delta: string; blockIndex: number }
+	/**
+	 * Opens a new assistant text block. Subsequent `text_delta` events belong
+	 * to this block until the next `text_start` (or terminal). Allocate UI
+	 * here if you render one Telegram message per block.
+	 */
+	| { type: "text_start" }
+	/** Strictly incremental — append to your buffer. Never a snapshot. Tied to the most recent `text_start`. */
+	| { type: "text_delta"; delta: string }
+	/** Opens a new reasoning block. Mirrors `text_start` for thinking. Safe to drop entirely. */
+	| { type: "thinking_start" }
+	/** Reasoning text. Tied to the most recent `thinking_start`. Safe to drop entirely. */
+	| { type: "thinking_delta"; delta: string }
 
 	// ─── Tools ───────────────────────────────────────────────────
 	| {
@@ -504,17 +533,25 @@ export interface RenderContext {
  * @example pass-through filter (drop thinking)
  *   import { filter } from "@core/render-kit.ts";
  *   renderer: async (events, ctx, next) =>
- *     next(filter(events, (e) => e.type !== "thinking_delta"));
+ *     next(filter(events, (e) =>
+ *       e.type !== "thinking_start" && e.type !== "thinking_delta"));
  *
- * @example terminal text body
+ * @example terminal text body (single answer message, blocks joined)
  *   import { messageStream, markdownToTelegramHtml } from "@core/render-kit.ts";
  *   renderer: async (events, ctx) => {
  *     const stream = messageStream(ctx.bot, ctx.target, { role: "body", kind: "primary" });
  *     let text = "";
+ *     let blocks = 0;
  *     for await (const e of events) {
- *       if (e.type === "text_delta") { text += e.delta; stream.set(markdownToTelegramHtml(text)); }
- *       else if (e.type === "complete") { if (e.text !== text) text = e.text;
- *                                         stream.set(markdownToTelegramHtml(text)); }
+ *       if (e.type === "text_start") {
+ *         if (blocks++ > 0) text += "\n\n";   // join successive blocks
+ *       } else if (e.type === "text_delta") {
+ *         text += e.delta;
+ *         stream.set(markdownToTelegramHtml(text));
+ *       } else if (e.type === "complete") {
+ *         if (e.text !== text) text = e.text;
+ *         stream.set(markdownToTelegramHtml(text));
+ *       }
  *     }
  *     await stream.flush();
  *     return { artifacts: stream.artifacts() };

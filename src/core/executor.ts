@@ -320,12 +320,15 @@ export class Executor {
 
 		const stopWatchdog = startWatchdog(opts.scope, project);
 		const startTime = Date.now();
+		// `totalText` is the running join of every text block seen so far,
+		// separated by "\n\n" — matches the shape of `complete.text` so a
+		// terminal we synthesize on error/abort is consistent with the SDK's
+		// authoritative final text.
 		let totalText = "";
 		let resultSessionId: string | undefined;
 		let turns = 0;
 		let costUsd = 0;
-		let hadTextOutput = false;
-		let blockCounter = 0;
+		let textBlocksEmitted = 0;
 		let usage: TokenUsage = {
 			inputTokens: 0,
 			outputTokens: 0,
@@ -391,20 +394,22 @@ export class Executor {
 						null;
 					for (const block of msg.message.content) {
 						if (block.type === "text") {
-							const sep = hadTextOutput && block.text.length > 0 ? "\n\n" : "";
-							yield {
-								type: "text_delta",
-								delta: sep + block.text,
-								blockIndex: blockCounter++,
-							};
-							totalText += sep + block.text;
-							hadTextOutput = true;
+							// One SDK content block of type "text" = one renderer-visible
+							// text block. Announce it explicitly; the delta carries clean
+							// text with no separator prefix.
+							yield { type: "text_start" };
+							if (block.text.length > 0) {
+								yield { type: "text_delta", delta: block.text };
+							}
+							if (textBlocksEmitted > 0) totalText += "\n\n";
+							totalText += block.text;
+							textBlocksEmitted++;
 						} else if (block.type === "thinking") {
-							yield {
-								type: "thinking_delta",
-								delta: (block as Record<string, string>).thinking ?? "",
-								blockIndex: blockCounter++,
-							};
+							const thinking = (block as Record<string, string>).thinking ?? "";
+							yield { type: "thinking_start" };
+							if (thinking.length > 0) {
+								yield { type: "thinking_delta", delta: thinking };
+							}
 						} else if (block.type === "tool_use") {
 							const callId =
 								(block as Record<string, string>).id ?? randomUUID();
@@ -657,15 +662,13 @@ export class Executor {
 						if (msg.type === "assistant") {
 							for (const block of msg.message.content) {
 								if (block.type === "text") {
-									const sep =
-										hadTextOutput && block.text.length > 0 ? "\n\n" : "";
-									yield {
-										type: "text_delta",
-										delta: sep + block.text,
-										blockIndex: blockCounter++,
-									};
-									totalText += sep + block.text;
-									hadTextOutput = true;
+									yield { type: "text_start" };
+									if (block.text.length > 0) {
+										yield { type: "text_delta", delta: block.text };
+									}
+									if (textBlocksEmitted > 0) totalText += "\n\n";
+									totalText += block.text;
+									textBlocksEmitted++;
 								}
 							}
 							resultSessionId = msg.session_id;

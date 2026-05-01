@@ -19,9 +19,14 @@ export async function defaultRenderer(
 		kind: "primary",
 	});
 	let text = "";
+	let textBlocks = 0;
 
 	for await (const event of events) {
-		if (event.type === "text_delta") {
+		if (event.type === "text_start") {
+			// Successive text blocks (text → tool → more text) are joined into
+			// a single growing message. First block: no separator.
+			if (textBlocks++ > 0) text += "\n\n";
+		} else if (event.type === "text_delta") {
 			text += event.delta;
 			stream.set(markdownToTelegramHtml(text));
 		} else if (event.type === "complete" || event.type === "aborted") {
