@@ -18,7 +18,7 @@
 		"typescript": "^5"
 	},
 	"dependencies": {
-		"@anthropic-ai/claude-agent-sdk": "^0.2.87",
+		"@anthropic-ai/claude-agent-sdk": "^0.3.160",
 		"@grammyjs/runner": "^2.0.3",
 		"@logtape/file": "^2.0.5",
 		"@logtape/logtape": "^2.0.5",
