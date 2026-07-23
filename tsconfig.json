@@ -21,13 +21,17 @@
 		"noUncheckedIndexedAccess": true,
 		"noImplicitOverride": true,
 
+		// TypeScript 7 doesn't follow `@types/bun`'s `/// <reference bun-types>`
+		// through Bun's isolated `node_modules/.bun` store, so name it explicitly.
+		"types": ["bun"],
+
 		// Some stricter flags (disabled by default)
 		"noUnusedLocals": false,
 		"noUnusedParameters": false,
 		"noPropertyAccessFromIndexSignature": false,
 
-		// Path aliases (Bun supports natively)
-		"baseUrl": ".",
+		// Path aliases (Bun supports natively). Paths are relative to this
+		// tsconfig's directory; TypeScript 7 removed `baseUrl`.
 		"paths": {
 			"@core/*": ["./src/core/*"],
 			"@templates/*": ["./src/templates/*"],

@@ -6,7 +6,6 @@ import type {
 	SDKMessage,
 	SDKResultSuccess,
 	SDKUserMessage,
-	SdkMcpToolDefinition,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
 	createSdkMcpServer,
@@ -74,7 +73,15 @@ function loadSystemPrompt(botRoot: string): string {
 	}
 }
 
-function createMcpServerConfig(tools: SdkMcpToolDefinition[]) {
+// The SDK's tool array is heterogeneous (each tool carries its own Zod schema),
+// which it models as `SdkMcpToolDefinition<any>`. Derive the element type from
+// `createSdkMcpServer`'s own signature instead of restating the `any` ourselves,
+// so this tracks the SDK contract and stays lint-clean.
+type McpToolDef = NonNullable<
+	Parameters<typeof createSdkMcpServer>[0]["tools"]
+>[number];
+
+function createMcpServerConfig(tools: McpToolDef[]) {
 	return createSdkMcpServer({
 		name: "claudegram-core",
 		version: "1.0.0",
@@ -165,7 +172,7 @@ export class Executor {
 		const toolCallTimers = new Map<string, { tool: string; start: number }>();
 
 		// Build MCP server for tools (core + plugin)
-		const allTools: SdkMcpToolDefinition[] = [];
+		const allTools: McpToolDef[] = [];
 		for (const tool of this.coreTools) {
 			const scopeCfg = this.config.data.coreTools[tool.name] ?? tool.scope;
 			if (!isScopeAllowed(scopeCfg, project, isSelf)) continue;
